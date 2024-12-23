@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Import the client classes
-from controllers import CRMClient, ERPClient
+from api.controllers import CRMClient, ERPClient
 
 # Disable SSL warning
 requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
