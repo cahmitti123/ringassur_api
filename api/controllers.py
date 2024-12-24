@@ -59,9 +59,11 @@ class CRMClient:
 
     def get_campaigns(self, start_date=None, end_date=None):
         """Get available campaigns for the given date range"""
-        # Set fixed test date
-        start_date = "2024-12-20 00:00:00"
-        end_date = "2024-12-20 23:59:59"
+        # Remove hardcoded dates and use parameters
+        if not start_date:
+            start_date = datetime.now().strftime("%Y-%m-%d 00:00:00")
+        if not end_date:
+            end_date = datetime.now().strftime("%Y-%m-%d 23:59:59")
 
         url = f"{self.base_url}/vvci/gestioncontacts/gestioncontacts/prodFilterDate"
         
@@ -156,9 +158,6 @@ class CRMClient:
 
     def export_campaign_data(self, campaign_values, start_date=None, end_date=None):
         """Export campaign data as CSV"""
-        # Set fixed test date
-        start_date = "2024-12-20 00:00:00"
-        end_date = "2024-12-20 23:59:59"
 
         url = f"{self.base_url}/vvci/gestioncontacts/gestioncontacts/search"
         
@@ -228,6 +227,7 @@ class CRMClient:
             
             # Generate unique download token
             download_token = f"cmk_export_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            
             
             # Use the exact same payload as in flashProdScript
             payload = {
