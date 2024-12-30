@@ -792,6 +792,13 @@ class JobsClient:
             # Get jobs page
             jobs_url = f"{self.base_url}/{company.lower()}/jobsoffres-emploi" if company else f"{self.base_url}/offres-emploi/"
             jobs_response = self.session.get(jobs_url)
+            
+            print(
+                'url ', jobs_url
+            )
+            print(
+                'jobs_response' , jobs_response.status_code 
+            )
             if jobs_response.status_code != 200:
                 raise Exception("Failed to fetch jobs page")
 
