@@ -42,3 +42,11 @@ Thumbs.db
 *.csv
 *.xlsx
 *.xls 
+
+/cvs
+/visualizations
+
+cands.ipynb
+data.ipynb
+downloaded_cvs.txt
+erp_data.py
