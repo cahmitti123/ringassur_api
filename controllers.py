@@ -587,7 +587,6 @@ class CRMClient:
             # Generate unique download token
             download_token = f"cmk_export_{datetime.now().strftime('%Y%m%d%H%M%S')}"
             
-            
             # Use the exact same payload as in flashProdScript
             payload = {
                 'CMK_FORM_ACTION': 'csv',
@@ -614,16 +613,59 @@ class CRMClient:
             response = self.session.post(url, data=payload, verify=False)
             
             if response.status_code == 200:
-                # Read CSV data
-                df = pd.read_csv(BytesIO(response.content), sep=';')
-                # Convert to JSON
-                json_data = json.loads(df.to_json(orient='records', date_format='iso'))
-                return {"success": True, "data": json_data}
+                # Try different encodings
+                encodings = ['utf-8', 'latin1', 'iso-8859-1', 'cp1252']
+                df = None
+                
+                for encoding in encodings:
+                    try:
+                        print(f"Trying encoding {encoding}")
+                        df = pd.read_csv(
+                            BytesIO(response.content),
+                            sep=';',
+                            encoding=encoding,
+                            on_bad_lines='skip'
+                        )
+                        if df is not None and not df.empty:
+                            print(f"Successfully read CSV with {encoding} encoding")
+                            break
+                    except Exception as e:
+                        print(f"Failed with encoding {encoding}: {str(e)}")
+                        continue
+                        
+                if df is None or df.empty:
+                    return {"error": "Failed to decode CSV data with any known encoding"}
+                
+                try:
+                    # Clean and convert the data
+                    df = df.fillna('')
+                    records = []
+                    for _, row in df.iterrows():
+                        clean_row = {}
+                        for col in df.columns:
+                            try:
+                                val = row[col]
+                                if pd.isna(val) or val == '':
+                                    clean_row[col] = None
+                                else:
+                                    clean_row[col] = str(val).encode('utf-8', errors='ignore').decode('utf-8')
+                            except Exception as e:
+                                print(f"Error processing column {col}: {str(e)}")
+                                clean_row[col] = None
+                        records.append(clean_row)
+                    
+                    return {"success": True, "data": records}
+                    
+                except Exception as e:
+                    print(f"Error during data conversion: {str(e)}")
+                    return {"error": f"Error converting data: {str(e)}"}
             else:
                 return {"error": f"Failed to get data. Status code: {response.status_code}"}
 
         except Exception as e:
-            print("Error" , e)
+            print("Error", e)
+            import traceback
+            traceback.print_exc()
             return {"error": f"Error getting data: {str(e)}"}
         
     def get_data_as_json_full(self, start_date=None, end_date=None, page=1, page_size=1000):
