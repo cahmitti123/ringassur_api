@@ -1323,37 +1323,83 @@ class ERPClient:
 
                 if response.status_code == 200:
                     try:
+                        # Save response content to a temporary file
+                        temp_file = BytesIO(response.content)
+                        
                         # Try to detect file type from content
-                        content_type = response.headers.get('Content-Type', '')
+                        content_type = response.headers.get('Content-Type', '').lower()
+                        print(f"Content-Type: {content_type}")
                         
-                        if 'excel' in content_type.lower() or response.url.endswith('.xlsx'):
-                            # Use openpyxl for .xlsx files
-                            self.stored_data = pd.read_excel(
-                                BytesIO(response.content), 
+                        # Try reading with different methods
+                        read_methods = [
+                            # Try openpyxl first for xlsx
+                            lambda: pd.read_excel(
+                                temp_file,
                                 engine='openpyxl'
+                            ),
+                            # Try odf for ods files
+                            lambda: pd.read_excel(
+                                temp_file,
+                                engine='odf'
+                            ),
+                            # Try CSV with different encodings
+                            lambda: pd.read_csv(
+                                temp_file,
+                                encoding='utf-8'
+                            ),
+                            lambda: pd.read_csv(
+                                temp_file,
+                                encoding='latin1'
+                            ),
+                            lambda: pd.read_csv(
+                                temp_file,
+                                encoding='iso-8859-1'
                             )
-                        else:
-                            # Try multiple engines
-                            engines = ['openpyxl', 'xlrd']
-                            for engine in engines:
-                                try:
-                                    self.stored_data = pd.read_excel(
-                                        BytesIO(response.content),
-                                        engine=engine
-                                    )
-                                    print(f"Successfully read Excel with {engine} engine")
-                                    break
-                                except Exception as e:
-                                    print(f"Failed with {engine} engine: {str(e)}")
-                                    continue
-                            
-                            if self.stored_data is None or self.stored_data.empty:
-                                raise Exception("Failed to read Excel data with any engine")
+                        ]
                         
+                        last_error = None
+                        for read_method in read_methods:
+                            try:
+                                temp_file.seek(0)  # Reset file pointer
+                                self.stored_data = read_method()
+                                if not self.stored_data.empty:
+                                    print("Successfully read data")
+                                    break
+                            except Exception as e:
+                                print(f"Read attempt failed: {str(e)}")
+                                last_error = e
+                                continue
+                        
+                        if self.stored_data is None or self.stored_data.empty:
+                            raise Exception(f"Failed to read data with any method. Last error: {str(last_error)}")
+
+                        # Clean the data
+                        self.stored_data = self.stored_data.replace({pd.NA: None})
+                        self.stored_data = self.stored_data.fillna('')
+                        
+                        # Convert dates to standard format
+                        for col in self.stored_data.columns:
+                            try:
+                                if self.stored_data[col].dtype == 'object':
+                                    # Try to convert to datetime
+                                    self.stored_data[col] = pd.to_datetime(
+                                        self.stored_data[col], 
+                                        errors='ignore',
+                                        format='mixed'
+                                    )
+                            except Exception as e:
+                                print(f"Error converting column {col}: {str(e)}")
+                                continue
+                        
+                        # Format datetime columns
+                        date_columns = self.stored_data.select_dtypes(include=['datetime64']).columns
+                        for col in date_columns:
+                            self.stored_data[col] = self.stored_data[col].dt.strftime('%Y-%m-%d %H:%M:%S')
+
                         self.last_fetch_time = datetime.now()
 
                         # Convert to JSON
-                        json_data = json.loads(self.stored_data.to_json(orient='records', date_format='iso'))
+                        json_data = self.stored_data.to_dict(orient='records')
 
                         # Get daily and weekly stats
                         daily_stats = self.get_daily_stats()
@@ -1366,9 +1412,12 @@ class ERPClient:
                             "daily_stats": daily_stats,
                             "weekly_stats": weekly_stats
                         }
+
                     except Exception as e:
-                        print(f"Error processing Excel data: {str(e)}")
-                        return {"error": f"Error processing Excel data: {str(e)}"}
+                        print(f"Error processing data: {str(e)}")
+                        import traceback
+                        traceback.print_exc()
+                        return {"error": f"Error processing data: {str(e)}"}
                 else:
                     return {"error": f"Failed to get contracts. Status code: {response.status_code}"}
 
@@ -1418,6 +1467,8 @@ class ERPClient:
 
         except Exception as e:
             print(f"Error getting contracts: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return {"error": f"Error getting contracts: {str(e)}"}
 
     def get_daily_stats(self):
