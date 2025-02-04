@@ -1269,52 +1269,94 @@ class ERPClient(BaseProxyClient):
         self.base_url = "https://erp.ringassur.fr"
         self.last_fetch_time = None
         self.stored_data = None
+        # Set up default headers
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7,ar;q=0.6',
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Origin': 'https://erp.ringassur.fr',
+            'Referer': 'https://erp.ringassur.fr/contracts'
+        })
 
     def login(self, email, password):
-        """Login to ERP with proxy support if needed"""
+        """Login to ERP"""
         try:
             print("Logging into ERP...")
-            print("Getting login page...")
             
-            # Get initial page to get cookies
-            response = self.make_request('GET', f"{self.base_url}/login")
-            print(f"Initial page status: {response.status_code}")
-            print(f"Initial cookies: {dict(self.session.cookies)}")
-
-            # Attempt login
-            print("Attempting login...")
+            # First get the homepage to get CSRF token
+            response = self.make_request(
+                'GET',
+                self.base_url,
+                verify=False,
+                headers={
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Cache-Control': 'max-age=0'
+                }
+            )
+            
+            print(f"Homepage status: {response.status_code}")
+            
+            # Parse HTML to get CSRF token from form
+            soup = BeautifulSoup(response.text, 'html.parser')
+            csrf_input = soup.find('input', {'name': '_token'})
+            if not csrf_input:
+                print("Could not find CSRF token in form")
+                return False
+                
+            csrf_token = csrf_input.get('value')
+            print(f"Got CSRF token from form: {csrf_token}")
+            
+            # Prepare login data
             login_data = {
+                '_token': csrf_token,
                 'email': email,
-                'password': password
+                'password': password,
+                'remember': 'on'
             }
             
+            # Update headers for login request
+            self.session.headers.update({
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Referer': self.base_url,
+                'Origin': self.base_url,
+                'Cache-Control': 'max-age=0',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7'
+            })
+            
+            # Make login request
+            print("Attempting login...")
             response = self.make_request(
                 'POST',
                 f"{self.base_url}/login",
-                json=login_data,
-                timeout=30
+                data=login_data,
+                verify=False,
+                allow_redirects=True
             )
             
             print(f"Login response status: {response.status_code}")
-            print(f"Login response headers: {dict(response.headers)}")
+            print(f"Login response URL: {response.url}")
             
             # Check if login was successful
-            if response.status_code == 200:
-                # Verify access to dashboard
-                dashboard_response = self.make_request(
-                    'GET',
-                    f"{self.base_url}/dashboard"
-                )
+            if response.status_code in (200, 302) and 'dashboard' in response.url:
+                print("Successfully logged into ERP")
+                return True
                 
-                if dashboard_response.status_code == 200 and 'login' not in dashboard_response.url:
-                    print("Successfully logged into ERP")
-                    return True
-                else:
-                    print("Login failed - cannot access dashboard")
-                    print(f"Response URL: {dashboard_response.url}")
-                    print(f"Response content: {dashboard_response.text[:500]}")
-                    return False
+            # Try accessing dashboard directly
+            dashboard_response = self.make_request(
+                'GET',
+                f"{self.base_url}/dashboard",
+                verify=False
+            )
             
+            if dashboard_response.status_code == 200 and 'login' not in dashboard_response.url:
+                print("Successfully logged into ERP (verified via dashboard)")
+                return True
+                
+            print("Login failed - cannot access dashboard")
+            print(f"Response URL: {response.url}")
+            if hasattr(response, 'text'):
+                print(f"Response content: {response.text[:500]}")
             return False
             
         except Exception as e:
@@ -1322,6 +1364,77 @@ class ERPClient(BaseProxyClient):
             import traceback
             traceback.print_exc()
             return False
+
+    def get_contracts_as_json(self, force_full_refresh=False):
+        """Get ERP contracts data from Excel export"""
+        try:
+            print("\n=== Getting Contracts Data ===")
+            
+            # Check if we need to re-authenticate
+            print("Checking dashboard access...")
+            dashboard_response = self.make_request(
+                'GET', 
+                f"{self.base_url}/dashboard",
+                verify=False
+            )
+            print(f"Dashboard response status: {dashboard_response.status_code}")
+            print(f"Dashboard URL: {dashboard_response.url}")
+            
+            if dashboard_response.status_code != 200 or 'login' in dashboard_response.url:
+                print("Session expired, re-authenticating...")
+                if not self.login(os.getenv("ERP_EMAIL"), os.getenv("ERP_PASSWORD")):
+                    return {"error": "Failed to re-authenticate with ERP"}
+
+            # Get the contracts export
+            print("\nFetching contracts export...")
+            response = self.make_request(
+                'GET',
+                f"{self.base_url}/contracts/export",
+                verify=False,
+                headers={
+                    'Accept': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                }
+            )
+            
+            print(f"Export response status: {response.status_code}")
+            print(f"Content-Type: {response.headers.get('content-type', 'Not specified')}")
+            
+            if response.status_code != 200:
+                return {"error": f"Failed to get contracts export. Status code: {response.status_code}"}
+
+            # Read Excel data
+            print("\nReading Excel data...")
+            try:
+                excel_data = pd.read_excel(BytesIO(response.content))
+                print(f"Found {len(excel_data)} contracts")
+                
+                # Clean up the data
+                excel_data = excel_data.replace({pd.NA: None})
+                excel_data = excel_data.fillna('')
+                
+                # Convert to dict format
+                contracts = excel_data.to_dict('records')
+                
+                # Store the data
+                self.stored_data = excel_data
+                self.last_fetch_time = datetime.now()
+                
+                return {
+                    "success": True,
+                    "data": contracts,
+                    "type": "full" if force_full_refresh else "incremental",
+                    "timestamp": self.last_fetch_time.isoformat()
+                }
+                
+            except Exception as e:
+                print(f"Error reading Excel data: {str(e)}")
+                return {"error": f"Failed to read Excel data: {str(e)}"}
+
+        except Exception as e:
+            print(f"\nError getting contracts: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return {"error": f"Error getting contracts: {str(e)}"}
 
 class JobsClient(BaseProxyClient):
     def __init__(self):

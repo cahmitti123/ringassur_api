@@ -200,9 +200,17 @@ async def lifespan(app: FastAPI):
             except:
                 pass
 
-app = FastAPI(title="Flash Prod API", lifespan=lifespan)
+# Create FastAPI app
+app = FastAPI(
+    title="API Service",
+    description="API service for CRM and ERP data",
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json"
+)
 
-# Configure CORS
+# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -210,6 +218,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Add lifespan event handler
+app.router.lifespan_context = lifespan
+
+# Move health check to root path
+@app.get("/", include_in_schema=True)
+async def root():
+    """Health check endpoint"""
+    return {
+        "status": "healthy",
+        "port": int(os.getenv("PORT", 8000)),
+        "timestamp": datetime.now().isoformat()
+    }
 
 class TimeRange(BaseModel):
     start_date: Optional[str] = None
@@ -761,4 +782,14 @@ if __name__ == "__main__":
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)
+    # Get port from environment variable with fallback to 8000
+    port = int(os.getenv("PORT", 8000))
+    print(f"Starting server on port {port}")
+    uvicorn.run(
+        "main:app", 
+        host="0.0.0.0", 
+        port=port, 
+        reload=False,
+        log_level="info",
+        access_log=True
+    )
