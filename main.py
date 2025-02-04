@@ -136,16 +136,30 @@ async def lifespan(app: FastAPI):
             
         # Login to job portals
         print("Logging into Xpercia job portal...")
-        if not xpercia_client.login(XPERCIA_LOGIN, XPERCIA_PASSWORD):
-            print("Error: Failed to login to Xpercia job portal")
-        else:
-            print("Successfully logged into Xpercia job portal")
-            
+        try:
+            if not xpercia_client.login(XPERCIA_LOGIN, XPERCIA_PASSWORD, timeout=30):
+                print("Error: Failed to login to Xpercia job portal")
+            else:
+                print("Successfully logged into Xpercia job portal")
+        except requests.exceptions.Timeout:
+            print("Error: Connection timed out while trying to login to Xpercia job portal")
+        except requests.exceptions.ConnectionError:
+            print("Error: Connection failed while trying to login to Xpercia job portal")
+        except Exception as e:
+            print(f"Error logging into Xpercia job portal: {str(e)}")
+        
         print("Logging into Perextel job portal...")
-        if not perextel_client.login(PEREXTEL_LOGIN, PEREXTEL_PASSWORD):
-            print("Error: Failed to login to Perextel job portal")
-        else:
-            print("Successfully logged into Perextel job portal")
+        try:
+            if not perextel_client.login(PEREXTEL_LOGIN, PEREXTEL_PASSWORD, timeout=30):
+                print("Error: Failed to login to Perextel job portal")
+            else:
+                print("Successfully logged into Perextel job portal")
+        except requests.exceptions.Timeout:
+            print("Error: Connection timed out while trying to login to Perextel job portal")
+        except requests.exceptions.ConnectionError:
+            print("Error: Connection failed while trying to login to Perextel job portal")
+        except Exception as e:
+            print(f"Error logging into Perextel job portal: {str(e)}")
         
         # # Initialize Neo client
         # print("Logging into Neoliane extranet...")
