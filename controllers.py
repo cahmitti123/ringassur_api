@@ -386,7 +386,7 @@ class CRMClient:
         except Exception as e:
             print(f"Error getting campaign data: {str(e)}")
             return None
-
+  
     def export_campaign_data(self, campaign_values, start_date=None, end_date=None):
         """Export campaign data as CSV"""
 
@@ -667,7 +667,111 @@ class CRMClient:
             import traceback
             traceback.print_exc()
             return {"error": f"Error getting data: {str(e)}"}
-        
+
+    def get_data_as_json_full(self, start_date=None, end_date=None):
+        """Get CRM data as JSON"""
+        try:
+            # Use today's date as default
+            if not start_date:
+                start_date = datetime.now().strftime("%Y-%m-%d 00:00:00")
+            if not end_date:
+                end_date = datetime.now().strftime("%Y-%m-%d 23:59:59")
+            
+            # Get campaigns first
+            campaigns = self.get_campaigns(start_date, end_date)
+            if not campaigns:
+                return {"error": "Failed to get campaigns"}
+            
+            # Get campaign values for Prevoyance
+            campaign_values = [c['value'] for c in campaigns.get('Prevoyance', [])]
+            
+            # Export the data using the same payload as flashProdScript
+            url = f"{self.base_url}/vvci/gestioncontacts/gestioncontacts/search"
+            
+            # Generate unique download token
+            download_token = f"cmk_export_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            
+            # Use the exact same payload as in flashProdScript
+            payload = {
+                'CMK_FORM_ACTION': 'csv',
+                'CMK_DWNLOAD_TOKEN': download_token,
+                'CMK_FORM_MODEL': '-1',
+                'CMK_FORM_CONTACTS': '-1',
+                'selectQualifs[7][]': [],
+                'selectGroups[]': campaign_values,
+                'selectGroup': 'on',
+                'dateprod[start]': start_date,
+                'dateprod[end]': end_date,
+                'dateType': '1',
+                'dateTraitement': f'Du {datetime.now().strftime("%d %B %Y")} Au {datetime.now().strftime("%d %B %Y")}',
+                'datetrait[start]': start_date,
+                'datetrait[end]': end_date,
+                'selectChamps[]': '',
+                'selectInputs[]': '-1'
+            }
+
+            # Add selectItem entries for each campaign value
+            for value in campaign_values:
+                payload['selectItem'] = value
+
+            response = self.session.post(url, data=payload, verify=False)
+            
+            if response.status_code == 200:
+                # Try different encodings
+                encodings = ['utf-8', 'latin1', 'iso-8859-1', 'cp1252']
+                df = None
+                
+                for encoding in encodings:
+                    try:
+                        print(f"Trying encoding {encoding}")
+                        df = pd.read_csv(
+                            BytesIO(response.content),
+                            sep=';',
+                            encoding=encoding,
+                            on_bad_lines='skip'
+                        )
+                        if df is not None and not df.empty:
+                            print(f"Successfully read CSV with {encoding} encoding")
+                            break
+                    except Exception as e:
+                        print(f"Failed with encoding {encoding}: {str(e)}")
+                        continue
+                        
+                if df is None or df.empty:
+                    return {"error": "Failed to decode CSV data with any known encoding"}
+                
+                try:
+                    # Clean and convert the data
+                    df = df.fillna('')
+                    records = []
+                    for _, row in df.iterrows():
+                        clean_row = {}
+                        for col in df.columns:
+                            try:
+                                val = row[col]
+                                if pd.isna(val) or val == '':
+                                    clean_row[col] = None
+                                else:
+                                    clean_row[col] = str(val).encode('utf-8', errors='ignore').decode('utf-8')
+                            except Exception as e:
+                                print(f"Error processing column {col}: {str(e)}")
+                                clean_row[col] = None
+                        records.append(clean_row)
+                    
+                    return {"success": True, "data": records}
+                    
+                except Exception as e:
+                    print(f"Error during data conversion: {str(e)}")
+                    return {"error": f"Error converting data: {str(e)}"}
+            else:
+                return {"error": f"Failed to get data. Status code: {response.status_code}"}
+
+        except Exception as e:
+            print("Error", e)
+            import traceback
+            traceback.print_exc()
+            return {"error": f"Error getting data: {str(e)}"}
+
     def get_data_as_json_full(self, start_date=None, end_date=None, page=1, page_size=1000):
         """Get CRM data as JSON with pagination"""
         try:
@@ -1218,24 +1322,53 @@ class ERPClient:
                 response = self.session.get(url, verify=False)
 
                 if response.status_code == 200:
-                    # Read Excel data
-                    self.stored_data = pd.read_excel(BytesIO(response.content))
-                    self.last_fetch_time = datetime.now()
+                    try:
+                        # Try to detect file type from content
+                        content_type = response.headers.get('Content-Type', '')
+                        
+                        if 'excel' in content_type.lower() or response.url.endswith('.xlsx'):
+                            # Use openpyxl for .xlsx files
+                            self.stored_data = pd.read_excel(
+                                BytesIO(response.content), 
+                                engine='openpyxl'
+                            )
+                        else:
+                            # Try multiple engines
+                            engines = ['openpyxl', 'xlrd']
+                            for engine in engines:
+                                try:
+                                    self.stored_data = pd.read_excel(
+                                        BytesIO(response.content),
+                                        engine=engine
+                                    )
+                                    print(f"Successfully read Excel with {engine} engine")
+                                    break
+                                except Exception as e:
+                                    print(f"Failed with {engine} engine: {str(e)}")
+                                    continue
+                            
+                            if self.stored_data is None or self.stored_data.empty:
+                                raise Exception("Failed to read Excel data with any engine")
+                        
+                        self.last_fetch_time = datetime.now()
 
-                    # Convert to JSON
-                    json_data = json.loads(self.stored_data.to_json(orient='records', date_format='iso'))
+                        # Convert to JSON
+                        json_data = json.loads(self.stored_data.to_json(orient='records', date_format='iso'))
 
-                    # Get daily and weekly stats
-                    daily_stats = self.get_daily_stats()
-                    weekly_stats = self.get_weekly_stats()
+                        # Get daily and weekly stats
+                        daily_stats = self.get_daily_stats()
+                        weekly_stats = self.get_weekly_stats()
 
-                    return {
-                        "success": True,
-                        "data": json_data,
-                        "type": "full_refresh",
-                        "daily_stats": daily_stats,
-                        "weekly_stats": weekly_stats
-                    }
+                        return {
+                            "success": True,
+                            "data": json_data,
+                            "type": "full_refresh",
+                            "daily_stats": daily_stats,
+                            "weekly_stats": weekly_stats
+                        }
+                    except Exception as e:
+                        print(f"Error processing Excel data: {str(e)}")
+                        return {"error": f"Error processing Excel data: {str(e)}"}
                 else:
                     return {"error": f"Failed to get contracts. Status code: {response.status_code}"}
 
@@ -1284,6 +1417,7 @@ class ERPClient:
                     return {"error": f"Failed to get incremental data. Status code: {response.status_code}"}
 
         except Exception as e:
+            print(f"Error getting contracts: {str(e)}")
             return {"error": f"Error getting contracts: {str(e)}"}
 
     def get_daily_stats(self):
@@ -1362,11 +1496,138 @@ class JobsClient:
         self.min_request_interval = 1  
         self.log_file: str = 'downloaded_cvs.txt'
         self.cvs_folder: str = 'cvs'
+        
+        # Add default timeouts
+        self.timeout = (10, 30)  # (connect timeout, read timeout)
+        
+        # Set up default headers
+        default_headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7'
+        }
+        
+        self.session.headers.update(default_headers)
+        self.mcdesk_session.headers.update(default_headers)
 
         # Create the cvs directory if it doesn't exist
         if not os.path.exists(self.cvs_folder):
             os.makedirs(self.cvs_folder)
-        
+
+    def login(self, username: str, password: str) -> bool:
+        """Login to moncallcenter.ma and mcdesk subdomain"""
+        try:
+            # Clear existing sessions
+            self.session = requests.Session()
+            self.mcdesk_session = requests.Session()
+            
+            # Set up headers again after creating new sessions
+            default_headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7'
+            }
+            self.session.headers.update(default_headers)
+            self.mcdesk_session.headers.update(default_headers)
+            
+            login_url = f"{self.base_url}/components/centre/loger_centre.php"
+            mcdesk_login_url = f"{self.mcdesk_url}/components/session/loger.php"
+
+            login_data = {
+                "LOGIN_C": username,
+                "PASSWORD_C": password
+            }
+            
+            mcdesk_login_data = {
+                "LOGIN_APP": username,
+                "PASSWORD_APP": password
+            }
+            
+            # Add retry logic for main site login
+            max_retries = 3
+            retry_delay = 2
+            
+            for attempt in range(max_retries):
+                try:
+                    # Login to main site
+                    response = self.session.post(
+                        login_url, 
+                        data=login_data, 
+                        timeout=self.timeout
+                    )
+                    if response.status_code == 200:
+                        break
+                except requests.exceptions.RequestException as e:
+                    print(f"Login attempt {attempt + 1} failed: {str(e)}")
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+                        continue
+                    raise
+            
+            # Add retry logic for mcdesk login
+            for attempt in range(max_retries):
+                try:
+                    # Login to mcdesk
+                    mcdesk_response = self.mcdesk_session.post(
+                        mcdesk_login_url, 
+                        data=mcdesk_login_data,
+                        timeout=self.timeout
+                    )
+                    if mcdesk_response.status_code == 200:
+                        break
+                except requests.exceptions.RequestException as e:
+                    print(f"Mcdesk login attempt {attempt + 1} failed: {str(e)}")
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+                        continue
+                    raise
+            
+            main_success = False
+            mcdesk_success = False
+            
+            # Verify main site login with retry
+            for attempt in range(max_retries):
+                try:
+                    check_response = self.session.get(
+                        f"{self.base_url}/recruteurs/",
+                        timeout=self.timeout
+                    )
+                    if check_response.status_code == 200 and 'login' not in check_response.url:
+                        print(f"Successfully logged into moncallcenter.ma as {username}")
+                        main_success = True
+                        break
+                except requests.exceptions.RequestException as e:
+                    print(f"Login verification attempt {attempt + 1} failed: {str(e)}")
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+                        continue
+                    
+            # Verify mcdesk login with retry
+            for attempt in range(max_retries):
+                try:
+                    mcdesk_check = self.mcdesk_session.get(
+                        f"{self.mcdesk_url}/candidatures/?",
+                        timeout=self.timeout
+                    )
+                    if mcdesk_check.status_code == 200 and 'login' not in mcdesk_check.url:
+                        print(f"Successfully logged into mcdesk.moncallcenter.ma as {username}")
+                        mcdesk_success = True
+                        break
+                except requests.exceptions.RequestException as e:
+                    print(f"Mcdesk verification attempt {attempt + 1} failed: {str(e)}")
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+                        continue
+            
+            # Return true only if both logins succeeded
+            return main_success and mcdesk_success
+
+        except Exception as e:
+            print(f"Error during login: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return False
+
     def _wait_for_rate_limit(self):
         """Ensure minimum time between requests"""
         now = time.time()
@@ -1434,57 +1695,6 @@ class JobsClient:
         except Exception as e:
             print(f"Error closing sessions: {str(e)}")
             
-    def login(self, username: str, password: str) -> bool:
-        """Login to moncallcenter.ma and mcdesk subdomain"""
-        try:
-            # Clear existing sessions
-            self.session = requests.Session()
-            self.mcdesk_session = requests.Session()
-            
-            
-            
-            login_url = f"{self.base_url}/components/centre/loger_centre.php"
-            mcdesk_login_url = f"{self.mcdesk_url}/components/session/loger.php"
-
-            login_data = {
-                "LOGIN_C": username,
-                "PASSWORD_C": password
-            }
-            
-            mcdesk_login_data = {
-                "LOGIN_APP": username,
-                "PASSWORD_APP": password
-            }
-            
-            # Login to main site
-            response = self.session.post(login_url, data=login_data)
-            # Login to mcdesk
-            mcdesk_response = self.mcdesk_session.post(mcdesk_login_url, data=mcdesk_login_data)
-            
-            main_success = False
-            mcdesk_success = False
-            
-            # Verify main site login
-            if response.status_code == 200:
-                check_response = self.session.get(f"{self.base_url}/recruteurs/")
-                if check_response.status_code == 200 and 'login' not in check_response.url:
-                    print(f"Successfully logged into moncallcenter.ma as {username}")
-                    main_success = True
-                    
-            # Verify mcdesk login        
-            if mcdesk_response.status_code == 200:
-                mcdesk_check = self.mcdesk_session.get(f"{self.mcdesk_url}/candidatures/?")
-                if mcdesk_check.status_code == 200 and 'login' not in mcdesk_check.url:
-                    print(f"Successfully logged into mcdesk.moncallcenter.ma as {username}")
-                    mcdesk_success = True
-            
-            # Return true only if both logins succeeded
-            return main_success and mcdesk_success
-
-        except Exception as e:
-            print(f"Error during login: {str(e)}")
-            return False
-
     def get_job_details(self, job_url: str):
         """Get detailed information about a specific job"""
         try:
@@ -2060,8 +2270,17 @@ class NeoClient:
             self.password = password
             
             print("\n=== Starting Neoliane Login Process ===")
-            print(f"Getting CSRF token from {self.base_url}/connection")
             
+            # Clear any existing session
+            self.session = requests.Session()
+            self.session.headers.update({
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7'
+            })
+            
+            # Get initial CSRF token
+            print(f"Getting CSRF token from {self.base_url}/connection")
             if not self.get_csrf_token():
                 print("Failed to get CSRF token")
                 return False
@@ -2083,16 +2302,26 @@ class NeoClient:
             print(f"Payload: {payload}")
             print(f"Current cookies: {dict(self.session.cookies)}")
 
+            # Make login request without following redirects
             response = self.session.post(
                 login_url,
                 data=payload,
                 verify=False,
-                allow_redirects=True
+                allow_redirects=False
             )
 
             print(f"\nLogin Response:")
             print(f"Status Code: {response.status_code}")
-            print(f"Final URL: {response.url}")
+            print(f"Location header: {response.headers.get('Location', 'No redirect')}")
+
+            # Handle redirect manually
+            if response.status_code in (301, 302, 303):
+                redirect_url = response.headers.get('Location')
+                if redirect_url:
+                    if not redirect_url.startswith('http'):
+                        redirect_url = f"{self.base_url}{redirect_url}"
+                    print(f"Following redirect to: {redirect_url}")
+                    response = self.session.get(redirect_url, verify=False)
 
             # Check if we need MFA
             if 'mfa' in response.url:
@@ -2101,20 +2330,8 @@ class NeoClient:
                 if not mfa_success:
                     print("MFA verification failed")
                     return False
-                
-                # After successful MFA, verify dashboard access
-                dashboard_response = self.session.get(
-                    f"{self.base_url}/dashboard",
-                    verify=False
-                )
-                return dashboard_response.status_code == 200 and 'dashboard' in dashboard_response.url
 
-            # If we got redirected back to login page, login failed
-            if 'connection' in response.url and 'lostpage' in response.url:
-                print("\nRedirected back to login page - authentication failed")
-                return False
-
-            # Verify dashboard access
+            # Verify login success by checking dashboard access
             dashboard_response = self.session.get(
                 f"{self.base_url}/dashboard",
                 verify=False
@@ -2123,10 +2340,10 @@ class NeoClient:
             login_success = dashboard_response.status_code == 200 and 'dashboard' in dashboard_response.url
             if login_success:
                 print("Successfully logged into Neoliane")
-                # Store credentials for re-login
-                self.username = username
-                self.password = password
-            return login_success
+                return True
+            else:
+                print(f"Login failed - redirected to {dashboard_response.url}")
+                return False
 
         except Exception as e:
             print(f"\nError during login: {e}")

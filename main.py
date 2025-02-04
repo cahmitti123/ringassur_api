@@ -147,13 +147,13 @@ async def lifespan(app: FastAPI):
         else:
             print("Successfully logged into Perextel job portal")
         
-        # Initialize Neo client
-        print("Logging into Neoliane extranet...")
-        neo_instance = await initialize_neo_client()
-        if not await neo_instance.login(NEO_LOGIN, NEO_PASSWORD):
-            print("Error: Failed to login to Neoliane")
-        else:
-            print("Successfully logged into Neoliane")
+        # # Initialize Neo client
+        # print("Logging into Neoliane extranet...")
+        # neo_instance = await initialize_neo_client()
+        # if not await neo_instance.login(NEO_LOGIN, NEO_PASSWORD):
+        #     print("Error: Failed to login to Neoliane")
+        # else:
+        #     print("Successfully logged into Neoliane")
         
         yield
     except Exception as e:
@@ -254,6 +254,20 @@ async def get_crm_data(time_range: TimeRange = TimeRange()):
     try:
         # Get the data using the global client instance
         result = crm_client.get_data_as_json(time_range.start_date, time_range.end_date)
+        
+        if "error" in result:
+            raise HTTPException(status_code=500, detail=result["error"])
+            
+        return result
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+@app.post("/api/crm/data/full")
+async def get_crm_data(time_range: TimeRange = TimeRange()):
+    try:
+        # Get the data using the global client instance
+        result = crm_client.get_data_as_json_full(time_range.start_date, time_range.end_date)
         
         if "error" in result:
             raise HTTPException(status_code=500, detail=result["error"])
