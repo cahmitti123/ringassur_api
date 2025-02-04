@@ -386,7 +386,7 @@ class CRMClient:
         except Exception as e:
             print(f"Error getting campaign data: {str(e)}")
             return None
-  
+
     def export_campaign_data(self, campaign_values, start_date=None, end_date=None):
         """Export campaign data as CSV"""
 
@@ -771,7 +771,7 @@ class CRMClient:
             import traceback
             traceback.print_exc()
             return {"error": f"Error getting data: {str(e)}"}
-
+        
     def get_data_as_json_full(self, start_date=None, end_date=None, page=1, page_size=1000):
         """Get CRM data as JSON with pagination"""
         try:
@@ -1207,353 +1207,141 @@ class CRMIncrementalClient(CRMClient):
             traceback.print_exc()
             return {"error": f"Error getting incremental data: {str(e)}"}
 
-class ERPClient:
+class BaseProxyClient:
+    # List of proxy servers
+    PROXY_LIST = [
+        "http://qapurtqr:5l41wybi63dm@198.23.239.134:6540",
+        "http://qapurtqr:5l41wybi63dm@207.244.217.165:6712",
+        "http://qapurtqr:5l41wybi63dm@107.172.163.27:6543",
+        "http://qapurtqr:5l41wybi63dm@64.137.42.112:5157",
+        "http://qapurtqr:5l41wybi63dm@173.211.0.148:6641",
+        "http://qapurtqr:5l41wybi63dm@161.123.152.115:6360",
+        "http://qapurtqr:5l41wybi63dm@23.94.138.75:6349",
+        "http://qapurtqr:5l41wybi63dm@154.36.110.199:6853",
+        "http://qapurtqr:5l41wybi63dm@173.0.9.70:5653",
+        "http://qapurtqr:5l41wybi63dm@173.0.9.209:5792"
+    ]
+
     def __init__(self):
-        self.base_url = "https://erp.ringassur.fr"
         self.session = requests.Session()
+        self.current_proxy = None
+        
+        # Configure session with retries
+        self.session.mount('https://', requests.adapters.HTTPAdapter(
+            max_retries=3,
+            pool_connections=100,
+            pool_maxsize=100
+        ))
+
+    def get_random_proxy(self):
+        """Get a random proxy from the list"""
+        self.current_proxy = random.choice(self.PROXY_LIST)
+        return {'https': self.current_proxy}
+
+    def make_request(self, method, url, retry_count=3, **kwargs):
+        """Make a request with proxy rotation and retry logic"""
+        last_error = None
+        
+        for attempt in range(retry_count):
+            try:
+                # Only use proxy if we're having connection issues
+                if attempt > 0:
+                    kwargs['proxies'] = self.get_random_proxy()
+                    print(f"Attempt {attempt + 1} using proxy: {self.current_proxy.split('@')[1]}")
+                
+                response = self.session.request(method, url, **kwargs)
+                return response
+                
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+                last_error = e
+                if attempt < retry_count - 1:
+                    print(f"Request attempt {attempt + 1} failed: {str(e)}")
+                    print("Waiting before retry with new proxy...")
+                    time.sleep(5)
+                    continue
+                
+        raise last_error
+
+# Update other clients to inherit from BaseProxyClient
+class ERPClient(BaseProxyClient):
+    def __init__(self):
+        super().__init__()
+        self.base_url = "https://erp.ringassur.fr"
         self.last_fetch_time = None
-        # Set up default headers
-        self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-            'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7,ar;q=0.6'
-        })
-        # Initialize stored data
-        self.stored_data = pd.DataFrame()
+        self.stored_data = None
 
     def login(self, email, password):
-        """Login to the ERP system"""
+        """Login to ERP with proxy support if needed"""
         try:
-            # First get the login page to get the initial session
-            print("\nGetting login page...")
-            response = self.session.get(
-                f"{self.base_url}/",  # Changed back to root URL
-                verify=False,
-                allow_redirects=True
+            print("Logging into ERP...")
+            print("Getting login page...")
+            
+            # Get initial page to get cookies
+            response = self.make_request('GET', f"{self.base_url}/login")
+            print(f"Initial page status: {response.status_code}")
+            print(f"Initial cookies: {dict(self.session.cookies)}")
+
+            # Attempt login
+            print("Attempting login...")
+            login_data = {
+                'email': email,
+                'password': password
+            }
+            
+            response = self.make_request(
+                'POST',
+                f"{self.base_url}/login",
+                json=login_data,
+                timeout=30
             )
             
-            print(f"Initial page status: {response.status_code}")
-            print(f"Initial cookies: {self.session.cookies.get_dict()}")
-
-            # Get CSRF token from cookies
-            csrf_token = self.session.cookies.get('XSRF-TOKEN')
-            if csrf_token:
-                from urllib.parse import unquote
-                csrf_token = unquote(csrf_token)
-                print(f"Decoded CSRF token: {csrf_token}")
-
-            # Update headers for login request
-            self.session.headers.update({
-                'X-XSRF-TOKEN': csrf_token,
-                'Content-Type': 'application/x-www-form-urlencoded',
-                'Origin': self.base_url,
-                'Referer': f"{self.base_url}/login",
-                'X-Requested-With': 'XMLHttpRequest',
-                'Accept': 'application/json'  # Added to expect JSON response
-            })
-
-            # Prepare login payload
-            payload = {
-                'email': email,
-                'password': password,
-                'remember': 'true'  # Added remember me option
-            }
-
-            print("\nAttempting login...")
-            login_response = self.session.post(
-                f"{self.base_url}/login",
-                data=payload,
-                verify=False,
-                allow_redirects=False  # Don't follow redirects for initial login
-            )
-            print(f"Login response status: {login_response.status_code}")
-            print(f"Login response headers: {dict(login_response.headers)}")
-
-            # If we get a redirect, follow it manually
-            if login_response.status_code in (301, 302):
-                redirect_url = login_response.headers.get('Location')
-                if redirect_url:
-                    if not redirect_url.startswith('http'):
-                        redirect_url = f"{self.base_url}{redirect_url}"
-                    print(f"Following redirect to: {redirect_url}")
-                    redirect_response = self.session.get(
-                        redirect_url,
-                        verify=False,
-                        allow_redirects=True
-                    )
-                    print(f"Redirect response status: {redirect_response.status_code}")
-
-            # Check if we're logged in
-            check_response = self.session.get(
-                f"{self.base_url}/dashboard",
-                verify=False,
-                headers={'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'}
-            )
-            if check_response.status_code == 200 and 'login' not in check_response.url:
-                print("Successfully logged into ERP")
-                return True
-            else:
-                print("Login failed - cannot access dashboard")
-                print(f"Response URL: {check_response.url}")
-                print(f"Response content: {check_response.text[:500]}...")
-                return False
-
+            print(f"Login response status: {response.status_code}")
+            print(f"Login response headers: {dict(response.headers)}")
+            
+            # Check if login was successful
+            if response.status_code == 200:
+                # Verify access to dashboard
+                dashboard_response = self.make_request(
+                    'GET',
+                    f"{self.base_url}/dashboard"
+                )
+                
+                if dashboard_response.status_code == 200 and 'login' not in dashboard_response.url:
+                    print("Successfully logged into ERP")
+                    return True
+                else:
+                    print("Login failed - cannot access dashboard")
+                    print(f"Response URL: {dashboard_response.url}")
+                    print(f"Response content: {dashboard_response.text[:500]}")
+                    return False
+            
+            return False
+            
         except Exception as e:
-            print(f"Error during ERP login: {str(e)}")
-            print(f"Full error: {str(e.__class__.__name__)}: {str(e)}")
+            print(f"Error during login: {str(e)}")
             import traceback
             traceback.print_exc()
             return False
 
-    def get_contracts_as_json(self, force_full_refresh=False):
-        """Get ERP contracts data as JSON with incremental loading, including daily and weekly stats"""
-        try:
-            # Get CSRF token for the request
-            csrf_token = self.session.cookies.get('XSRF-TOKEN')
-            if csrf_token:
-                from urllib.parse import unquote
-                csrf_token = unquote(csrf_token)
-                self.session.headers.update({'X-XSRF-TOKEN': csrf_token})
-
-            # If it's first time or force refresh, get all data
-            if self.last_fetch_time is None or force_full_refresh:
-                print("Fetching full data...")
-                url = f"{self.base_url}/contracts/export"
-                response = self.session.get(url, verify=False)
-
-                if response.status_code == 200:
-                    try:
-                        # Save response content to a temporary file
-                        temp_file = BytesIO(response.content)
-                        
-                        # Try to detect file type from content
-                        content_type = response.headers.get('Content-Type', '').lower()
-                        print(f"Content-Type: {content_type}")
-                        
-                        # Try reading with different methods
-                        read_methods = [
-                            # Try openpyxl first for xlsx
-                            lambda: pd.read_excel(
-                                temp_file,
-                                engine='openpyxl'
-                            ),
-                            # Try odf for ods files
-                            lambda: pd.read_excel(
-                                temp_file,
-                                engine='odf'
-                            ),
-                            # Try CSV with different encodings
-                            lambda: pd.read_csv(
-                                temp_file,
-                                encoding='utf-8'
-                            ),
-                            lambda: pd.read_csv(
-                                temp_file,
-                                encoding='latin1'
-                            ),
-                            lambda: pd.read_csv(
-                                temp_file,
-                                encoding='iso-8859-1'
-                            )
-                        ]
-                        
-                        last_error = None
-                        for read_method in read_methods:
-                            try:
-                                temp_file.seek(0)  # Reset file pointer
-                                self.stored_data = read_method()
-                                if not self.stored_data.empty:
-                                    print("Successfully read data")
-                                    break
-                            except Exception as e:
-                                print(f"Read attempt failed: {str(e)}")
-                                last_error = e
-                                continue
-                        
-                        if self.stored_data is None or self.stored_data.empty:
-                            raise Exception(f"Failed to read data with any method. Last error: {str(last_error)}")
-
-                        # Clean the data
-                        self.stored_data = self.stored_data.replace({pd.NA: None})
-                        self.stored_data = self.stored_data.fillna('')
-                        
-                        # Convert dates to standard format
-                        for col in self.stored_data.columns:
-                            try:
-                                if self.stored_data[col].dtype == 'object':
-                                    # Try to convert to datetime
-                                    self.stored_data[col] = pd.to_datetime(
-                                        self.stored_data[col], 
-                                        errors='ignore',
-                                        format='mixed'
-                                    )
-                            except Exception as e:
-                                print(f"Error converting column {col}: {str(e)}")
-                                continue
-                        
-                        # Format datetime columns
-                        date_columns = self.stored_data.select_dtypes(include=['datetime64']).columns
-                        for col in date_columns:
-                            self.stored_data[col] = self.stored_data[col].dt.strftime('%Y-%m-%d %H:%M:%S')
-
-                        self.last_fetch_time = datetime.now()
-
-                        # Convert to JSON
-                        json_data = self.stored_data.to_dict(orient='records')
-
-                        # Get daily and weekly stats
-                        daily_stats = self.get_daily_stats()
-                        weekly_stats = self.get_weekly_stats()
-
-                        return {
-                            "success": True,
-                            "data": json_data,
-                            "type": "full_refresh",
-                            "daily_stats": daily_stats,
-                            "weekly_stats": weekly_stats
-                        }
-
-                    except Exception as e:
-                        print(f"Error processing data: {str(e)}")
-                        import traceback
-                        traceback.print_exc()
-                        return {"error": f"Error processing data: {str(e)}"}
-                else:
-                    return {"error": f"Failed to get contracts. Status code: {response.status_code}"}
-
-            else:
-                # Get only new data since last fetch
-                print(f"Fetching incremental data since {self.last_fetch_time}...")
-                url = f"{self.base_url}/contracts"
-                params = {
-                    'start_date': self.last_fetch_time.strftime("%Y-%m-%d %H:%M:%S")
-                }
-                response = self.session.get(url, params=params, verify=False)
-
-                if response.status_code == 200:
-                    try:
-                        # Parse new data
-                        new_data = pd.DataFrame(response.json())
-
-                        if not new_data.empty:
-                            # Append new data to stored data
-                            self.stored_data = pd.concat([self.stored_data, new_data], ignore_index=True)
-                            # Remove duplicates if any
-                            self.stored_data = self.stored_data.drop_duplicates(subset=['id'], keep='last')
-
-                        self.last_fetch_time = datetime.now()
-
-                        # Convert to JSON
-                        json_data = json.loads(self.stored_data.to_json(orient='records', date_format='iso'))
-
-                        # Get daily and weekly stats
-                        daily_stats = self.get_daily_stats()
-                        weekly_stats = self.get_weekly_stats()
-
-                        return {
-                            "success": True,
-                            "data": json_data,
-                            "type": "incremental",
-                            "new_records": len(new_data) if not new_data.empty else 0,
-                            "daily_stats": daily_stats,
-                            "weekly_stats": weekly_stats
-                        }
-                    except Exception as e:
-                        print(f"Error processing incremental data: {e}")
-                        # If there's an error with incremental update, fall back to full refresh
-                        return self.get_contracts_as_json(force_full_refresh=True)
-                else:
-                    return {"error": f"Failed to get incremental data. Status code: {response.status_code}"}
-
-        except Exception as e:
-            print(f"Error getting contracts: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            return {"error": f"Error getting contracts: {str(e)}"}
-
-    def get_daily_stats(self):
-        """Get daily stats of the sales"""
-        try:
-            if self.stored_data.empty:
-                return {"error": "No data available to calculate daily stats."}
-
-            df = self.stored_data.copy()
-
-            # Ensure 'Créer le' is in datetime format
-            df["Créer le"] = pd.to_datetime(df["Créer le"], errors='coerce')
-
-            # Group by commercial and day, then count sales
-            daily_stats = df.groupby([df['Commercial'], df['Créer le'].dt.date]).size().reset_index(name='Daily Sales')
-
-            # Convert 'Daily Sales' to int to ensure no floats
-            daily_stats['Daily Sales'] = daily_stats['Daily Sales'].astype(int)
-
-            # Convert the dataframe to a list of dictionaries (JSON serializable format)
-            daily_stats = daily_stats.to_dict(orient='records')
-
-            return daily_stats
-
-        except Exception as e:
-            return {"error": f"Error getting daily stats: {str(e)}"}
-
-    def get_weekly_stats(self):
-        """Get weekly stats of the sales"""
-        try:
-            if self.stored_data.empty:
-                return {"error": "No data available to calculate weekly stats."}
-
-            df = self.stored_data.copy()
-
-            # Ensure 'Créer le' is in datetime format
-            df["Créer le"] = pd.to_datetime(df["Créer le"], errors='coerce')
-
-            # Extract month and week number for each sale relative to the month
-            df['Month'] = df['Créer le'].dt.to_period('M')  # Extracts month in YYYY-MM format
-            df['Day of Month'] = df['Créer le'].dt.day
-            df['Relative Week Number'] = ((df['Day of Month'] - 1) // 7) + 1
-
-            # Group by commercial, month, and relative week number
-            weekly_stats = df.groupby([df['Commercial'], df['Month'], df['Relative Week Number']]).size().reset_index(name='Weekly Sales')
-
-            # Convert 'Weekly Sales' to int to ensure no floats
-            weekly_stats['Weekly Sales'] = weekly_stats['Weekly Sales'].astype(int)
-
-            # Convert the dataframe to a list of dictionaries (JSON serializable format)
-            weekly_stats = weekly_stats.to_dict(orient='records')
-
-            return weekly_stats
-
-        except Exception as e:
-            return {"error": f"Error getting weekly stats: {str(e)}"}
-
-
-        
-    def close(self):
-        """Close the client's session"""
-        try:
-            if self.session:
-                self.session.close()
-                self.session = None
-        except Exception as e:
-            print(f"Error closing session: {str(e)}")
-
-class JobsClient:
+class JobsClient(BaseProxyClient):
     def __init__(self):
-        self.session = requests.Session()
+        super().__init__()
         self.base_url = "https://www.moncallcenter.ma"
         self.login_url = f"{self.base_url}/components/centre/loger_centre.php"
+        
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         })
 
-    def login(self, username, password, timeout=30):
-        """Login to the portal with retries and improved error handling"""
-        max_retries = 3
-        retry_delay = 5
+    def login(self, username, password, timeout=60):
+        """Login with proxy support"""
+        max_retries = 5
+        retry_delay = 10
         
         for attempt in range(max_retries):
             try:
-                response = self.session.post(
+                response = self.make_request(
+                    'POST',
                     self.login_url,
                     data={
                         'username': username,
@@ -1566,27 +1354,16 @@ class JobsClient:
                 if response.status_code == 200:
                     return True
                     
-            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            except Exception as e:
                 if attempt < max_retries - 1:
                     print(f"Login attempt {attempt + 1} failed: {str(e)}")
                     time.sleep(retry_delay)
                     continue
                 else:
-                    print(f"Error during login: {str(e)}")
+                    print(f"Error during login after {max_retries} attempts: {str(e)}")
                     return False
-                    
-            except Exception as e:
-                print(f"Unexpected error during login: {str(e)}")
-                return False
                 
         return False
-
-    def close(self):
-        """Close the session"""
-        try:
-            self.session.close()
-        except:
-            pass
 
 class NeoClient:
     def __init__(self):
@@ -1676,7 +1453,7 @@ class NeoClient:
                 if not mfa_success:
                     print("MFA verification failed")
                     return False
-
+                
             # Verify login success by checking dashboard access
             dashboard_response = self.session.get(
                 f"{self.base_url}/dashboard",

@@ -16,7 +16,15 @@ import asyncio
 load_dotenv()
 
 # Import the client classes
-from controllers import CRMClient, ERPClient, CRMClientFormaExpert, JobsClient, CRMIncrementalClient, NeoClient
+from controllers import (
+    BaseProxyClient,
+    CRMClient, 
+    ERPClient, 
+    CRMClientFormaExpert, 
+    JobsClient, 
+    CRMIncrementalClient, 
+    NeoClient
+)
 
 # Disable SSL warning
 requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
