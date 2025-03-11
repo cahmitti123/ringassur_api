@@ -59,6 +59,9 @@ neo_client = None
 mfa_queue = Queue()
 mfa_response_queue = Queue()
 
+# Add the Sheet ID to environment variables
+SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
+
 async def wait_for_mfa_code():
     """Wait for MFA code to be provided via API endpoint"""
     try:
@@ -771,6 +774,249 @@ async def get_neo_contracts(
         
     except Exception as e:
         print(f"Error in get_neo_contracts: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/perextel/cands/export")
+async def export_perextel_cands_to_csv(
+    company: Optional[str] = None, 
+    filename: Optional[str] = None
+):
+    """Export Perextel candidate listings to a CSV file"""
+    try:
+        if not perextel_client.check_login():
+            if not all([PEREXTEL_LOGIN, PEREXTEL_PASSWORD]):
+                raise HTTPException(
+                    status_code=500, 
+                    detail="Missing Perextel credentials"
+                )
+            if not perextel_client.login(PEREXTEL_LOGIN, PEREXTEL_PASSWORD):
+                raise HTTPException(
+                    status_code=401, 
+                    detail="Failed to authenticate Perextel account"
+                )
+        
+        # Use provided filename or generate a timestamped one
+        if not filename:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"perextel_candidatures_{timestamp}.csv"
+        
+        # Export to CSV
+        result = perextel_client.export_candidatures_to_csv(company, filename)
+        
+        return {"message": result, "filename": filename}
+        
+    except Exception as e:
+        print(f"Error in export_perextel_cands_to_csv: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/xpercia/cands/export")
+async def export_xpercia_cands_to_csv(
+    company: Optional[str] = None, 
+    filename: Optional[str] = None
+):
+    """Export Xpercia candidate listings to a CSV file"""
+    try:
+        if not xpercia_client.check_login():
+            if not all([XPERCIA_LOGIN, XPERCIA_PASSWORD]):
+                raise HTTPException(
+                    status_code=500, 
+                    detail="Missing Xpercia credentials"
+                )
+            if not xpercia_client.login(XPERCIA_LOGIN, XPERCIA_PASSWORD):
+                raise HTTPException(
+                    status_code=401, 
+                    detail="Failed to authenticate Xpercia account"
+                )
+        
+        # Use provided filename or generate a timestamped one
+        if not filename:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"xpercia_candidatures_{timestamp}.csv"
+        
+        # Export to CSV
+        result = xpercia_client.export_candidatures_to_csv(company, filename)
+        
+        return {"message": result, "filename": filename}
+        
+    except Exception as e:
+        print(f"Error in export_xpercia_cands_to_csv: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/cands/export")
+async def export_cands_to_csv(
+    company: str,
+    filename: Optional[str] = None
+):
+    """
+    Export candidate listings to a CSV file for any company
+    
+    Args:
+        company: Company name (e.g., 'perextel', 'xpercia')
+        filename: Optional custom filename for the CSV
+    """
+    try:
+        # Select the appropriate client based on company
+        if company.lower() == 'perextel':
+            client = perextel_client
+            credentials = (PEREXTEL_LOGIN, PEREXTEL_PASSWORD)
+        elif company.lower() == 'xpercia':
+            client = xpercia_client
+            credentials = (XPERCIA_LOGIN, XPERCIA_PASSWORD)
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported company: {company}. Available options: 'perextel', 'xpercia'"
+            )
+        
+        # Check login and authenticate if needed
+        if not client.check_login():
+            login, password = credentials
+            if not all([login, password]):
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Missing {company} credentials"
+                )
+            if not client.login(login, password):
+                raise HTTPException(
+                    status_code=401,
+                    detail=f"Failed to authenticate {company} account"
+                )
+        
+        # Use provided filename or generate a timestamped one
+        if not filename:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{company}_candidatures_{timestamp}.csv"
+        
+        # Export to CSV
+        result = client.export_candidatures_to_csv(company, filename)
+        
+        return {
+            "message": result,
+            "filename": filename,
+            "company": company
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error in export_cands_to_csv: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/cands/export-to-sheet")
+async def export_cands_to_sheet(
+    company: str,
+    sheet_name: Optional[str] = None
+):
+    """
+    Export candidate listings to a Google Sheet for any company.
+    Only adds new candidates that don't already exist in the sheet.
+    Stops processing when it encounters an existing ID.
+    
+    Args:
+        company: Company name (e.g., 'perextel', 'xpercia')
+        sheet_name: Optional name of the specific sheet/tab (e.g., "Xpercia" or "Perextel")
+    """
+    try:
+        # Check if Sheet ID is configured
+        if not SHEET_ID:
+            raise HTTPException(
+                status_code=500,
+                detail="Google Sheet ID not configured in environment variables (GOOGLE_SHEET_ID)"
+            )
+            
+        # Select the appropriate client based on company
+        if company.lower() == 'perextel':
+            client = perextel_client
+            credentials = (PEREXTEL_LOGIN, PEREXTEL_PASSWORD)
+            # Use company name as sheet name if not provided
+            if not sheet_name:
+                sheet_name = "Perextel"
+        elif company.lower() == 'xpercia':
+            client = xpercia_client
+            credentials = (XPERCIA_LOGIN, XPERCIA_PASSWORD)
+            # Use company name as sheet name if not provided
+            if not sheet_name:
+                sheet_name = "Xpercia"
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported company: {company}. Available options: 'perextel', 'xpercia'"
+            )
+        
+        # Check login and authenticate if needed
+        if not client.check_login():
+            login, password = credentials
+            if not all([login, password]):
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Missing {company} credentials"
+                )
+            if not client.login(login, password):
+                raise HTTPException(
+                    status_code=401,
+                    detail=f"Failed to authenticate {company} account"
+                )
+        
+        # Export to Google Sheet
+        result = client.export_candidatures_to_google_sheet(SHEET_ID, company, sheet_name)
+        
+        return {
+            "message": result,
+            "sheet_id": SHEET_ID,
+            "company": company,
+            "sheet_name": sheet_name
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error in export_cands_to_sheet: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/perextel/cands/export-to-sheet")
+async def export_perextel_cands_to_sheet(
+    sheet_name: str = "Perextel"
+):
+    """
+    Export Perextel candidate listings to a Google Sheet.
+    Only adds new candidates that don't already exist in the sheet.
+    
+    Args:
+        sheet_name: Name of the specific sheet/tab (defaults to "Perextel")
+    """
+    try:
+        return await export_cands_to_sheet(company="perextel", sheet_name=sheet_name)
+    except Exception as e:
+        print(f"Error in export_perextel_cands_to_sheet: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/xpercia/cands/export-to-sheet")
+async def export_xpercia_cands_to_sheet(
+    sheet_name: str = "Xpercia"
+):
+    """
+    Export Xpercia candidate listings to a Google Sheet.
+    Only adds new candidates that don't already exist in the sheet.
+    
+    Args:
+        sheet_name: Name of the specific sheet/tab (defaults to "Xpercia")
+    """
+    try:
+        return await export_cands_to_sheet(company="xpercia", sheet_name=sheet_name)
+    except Exception as e:
+        print(f"Error in export_xpercia_cands_to_sheet: {str(e)}")
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))

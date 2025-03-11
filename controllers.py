@@ -12,6 +12,19 @@ import time
 import os
 from urllib.parse import urlparse
 import xlsxwriter
+import csv
+import numpy as np
+from datetime import datetime, timedelta
+from typing import List, Dict, Optional, Union, Any
+from bs4 import BeautifulSoup
+from io import BytesIO
+import base64
+from urllib.parse import urljoin, urlparse
+import pickle
+import google.auth
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 
 # Disable SSL warning
@@ -386,7 +399,7 @@ class CRMClient:
         except Exception as e:
             print(f"Error getting campaign data: {str(e)}")
             return None
-
+  
     def export_campaign_data(self, campaign_values, start_date=None, end_date=None):
         """Export campaign data as CSV"""
 
@@ -771,7 +784,7 @@ class CRMClient:
             import traceback
             traceback.print_exc()
             return {"error": f"Error getting data: {str(e)}"}
-        
+
     def get_data_as_json_full(self, start_date=None, end_date=None, page=1, page_size=1000):
         """Get CRM data as JSON with pagination"""
         try:
@@ -1206,7 +1219,7 @@ class CRMIncrementalClient(CRMClient):
             import traceback
             traceback.print_exc()
             return {"error": f"Error getting incremental data: {str(e)}"}
-
+        
 class BaseProxyClient:
     # List of proxy servers
     PROXY_LIST = [
@@ -1262,221 +1275,1216 @@ class BaseProxyClient:
                 
         raise last_error
 
-# Update other clients to inherit from BaseProxyClient
 class ERPClient(BaseProxyClient):
     def __init__(self):
         super().__init__()
         self.base_url = "https://erp.ringassur.fr"
+        self.session = requests.Session()
         self.last_fetch_time = None
-        self.stored_data = None
         # Set up default headers
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-            'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7,ar;q=0.6',
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'Origin': 'https://erp.ringassur.fr',
-            'Referer': 'https://erp.ringassur.fr/contracts'
+            'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7,ar;q=0.6'
         })
+        # Initialize stored data
+        self.stored_data = pd.DataFrame()
 
     def login(self, email, password):
-        """Login to ERP"""
+        """Login to the ERP system"""
         try:
-            print("Logging into ERP...")
-            
-            # First get the homepage to get CSRF token
-            response = self.make_request(
-                'GET',
-                self.base_url,
-                verify=False,
-                headers={
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                    'Cache-Control': 'max-age=0'
-                }
-            )
-            
-            print(f"Homepage status: {response.status_code}")
-            
-            # Parse HTML to get CSRF token from form
-            soup = BeautifulSoup(response.text, 'html.parser')
-            csrf_input = soup.find('input', {'name': '_token'})
-            if not csrf_input:
-                print("Could not find CSRF token in form")
-                return False
-                
-            csrf_token = csrf_input.get('value')
-            print(f"Got CSRF token from form: {csrf_token}")
-            
-            # Prepare login data
-            login_data = {
-                '_token': csrf_token,
-                'email': email,
-                'password': password,
-                'remember': 'on'
-            }
-            
-            # Update headers for login request
-            self.session.headers.update({
-                'Content-Type': 'application/x-www-form-urlencoded',
-                'Referer': self.base_url,
-                'Origin': self.base_url,
-                'Cache-Control': 'max-age=0',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7'
-            })
-            
-            # Make login request
-            print("Attempting login...")
-            response = self.make_request(
-                'POST',
-                f"{self.base_url}/login",
-                data=login_data,
+            # First get the login page to get the initial session
+            print("\nGetting login page...")
+            response = self.session.get(
+                f"{self.base_url}/",  # Changed back to root URL
                 verify=False,
                 allow_redirects=True
             )
             
-            print(f"Login response status: {response.status_code}")
-            print(f"Login response URL: {response.url}")
-            
-            # Check if login was successful
-            if response.status_code in (200, 302) and 'dashboard' in response.url:
+            print(f"Initial page status: {response.status_code}")
+            print(f"Initial cookies: {self.session.cookies.get_dict()}")
+
+            # Get CSRF token from cookies
+            csrf_token = self.session.cookies.get('XSRF-TOKEN')
+            if csrf_token:
+                from urllib.parse import unquote
+                csrf_token = unquote(csrf_token)
+                print(f"Decoded CSRF token: {csrf_token}")
+
+            # Update headers for login request
+            self.session.headers.update({
+                'X-XSRF-TOKEN': csrf_token,
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Origin': self.base_url,
+                'Referer': f"{self.base_url}/login",
+                'X-Requested-With': 'XMLHttpRequest',
+                'Accept': 'application/json'  # Added to expect JSON response
+            })
+
+            # Prepare login payload
+            payload = {
+                'email': email,
+                'password': password,
+                'remember': 'true'  # Added remember me option
+            }
+
+            print("\nAttempting login...")
+            login_response = self.session.post(
+                f"{self.base_url}/login",
+                data=payload,
+                verify=False,
+                allow_redirects=False  # Don't follow redirects for initial login
+            )
+            print(f"Login response status: {login_response.status_code}")
+            print(f"Login response headers: {dict(login_response.headers)}")
+
+            # If we get a redirect, follow it manually
+            if login_response.status_code in (301, 302):
+                redirect_url = login_response.headers.get('Location')
+                if redirect_url:
+                    if not redirect_url.startswith('http'):
+                        redirect_url = f"{self.base_url}{redirect_url}"
+                    print(f"Following redirect to: {redirect_url}")
+                    redirect_response = self.session.get(
+                        redirect_url,
+                        verify=False,
+                        allow_redirects=True
+                    )
+                    print(f"Redirect response status: {redirect_response.status_code}")
+
+            # Check if we're logged in
+            check_response = self.session.get(
+                f"{self.base_url}/dashboard",
+                verify=False,
+                headers={'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'}
+            )
+            if check_response.status_code == 200 and 'login' not in check_response.url:
                 print("Successfully logged into ERP")
                 return True
-                
-            # Try accessing dashboard directly
-            dashboard_response = self.make_request(
-                'GET',
-                f"{self.base_url}/dashboard",
-                verify=False
-            )
-            
-            if dashboard_response.status_code == 200 and 'login' not in dashboard_response.url:
-                print("Successfully logged into ERP (verified via dashboard)")
-                return True
-                
-            print("Login failed - cannot access dashboard")
-            print(f"Response URL: {response.url}")
-            if hasattr(response, 'text'):
-                print(f"Response content: {response.text[:500]}")
+            else:
+                print("Login failed - cannot access dashboard")
+                print(f"Response URL: {check_response.url}")
+                print(f"Response content: {check_response.text[:500]}...")
+                return False
+
+        except Exception as e:
+            print(f"Error during ERP login: {str(e)}")
+            print(f"Full error: {str(e.__class__.__name__)}: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return False
+
+    def get_contracts_as_json(self, force_full_refresh=False):
+        """Get ERP contracts data as JSON with incremental loading, including daily and weekly stats"""
+        try:
+            # Get CSRF token for the request
+            csrf_token = self.session.cookies.get('XSRF-TOKEN')
+            if csrf_token:
+                from urllib.parse import unquote
+                csrf_token = unquote(csrf_token)
+                self.session.headers.update({'X-XSRF-TOKEN': csrf_token})
+
+            # If it's first time or force refresh, get all data
+            if self.last_fetch_time is None or force_full_refresh:
+                print("Fetching full data...")
+                url = f"{self.base_url}/contracts/export"
+                response = self.session.get(url, verify=False)
+
+                if response.status_code == 200:
+                    try:
+                        # Save response content to a temporary file
+                        temp_file = BytesIO(response.content)
+                        
+                        # Try to detect file type from content
+                        content_type = response.headers.get('Content-Type', '').lower()
+                        print(f"Content-Type: {content_type}")
+                        
+                        # Try reading with different methods
+                        read_methods = [
+                            # Try openpyxl first for xlsx
+                            lambda: pd.read_excel(
+                                temp_file,
+                                engine='openpyxl'
+                            ),
+                            # Try odf for ods files
+                            lambda: pd.read_excel(
+                                temp_file,
+                                engine='odf'
+                            ),
+                            # Try CSV with different encodings
+                            lambda: pd.read_csv(
+                                temp_file,
+                                encoding='utf-8'
+                            ),
+                            lambda: pd.read_csv(
+                                temp_file,
+                                encoding='latin1'
+                            ),
+                            lambda: pd.read_csv(
+                                temp_file,
+                                encoding='iso-8859-1'
+                            )
+                        ]
+                        
+                        last_error = None
+                        for read_method in read_methods:
+                            try:
+                                temp_file.seek(0)  # Reset file pointer
+                                self.stored_data = read_method()
+                                if not self.stored_data.empty:
+                                    print("Successfully read data")
+                                    break
+                            except Exception as e:
+                                print(f"Read attempt failed: {str(e)}")
+                                last_error = e
+                                continue
+                        
+                        if self.stored_data is None or self.stored_data.empty:
+                            raise Exception(f"Failed to read data with any method. Last error: {str(last_error)}")
+
+                        # Clean the data
+                        self.stored_data = self.stored_data.replace({pd.NA: None})
+                        self.stored_data = self.stored_data.fillna('')
+                        
+                        # Convert dates to standard format
+                        for col in self.stored_data.columns:
+                            try:
+                                if self.stored_data[col].dtype == 'object':
+                                    # Try to convert to datetime
+                                    self.stored_data[col] = pd.to_datetime(
+                                        self.stored_data[col], 
+                                        errors='ignore',
+                                        format='mixed'
+                                    )
+                            except Exception as e:
+                                print(f"Error converting column {col}: {str(e)}")
+                                continue
+                        
+                        # Format datetime columns
+                        date_columns = self.stored_data.select_dtypes(include=['datetime64']).columns
+                        for col in date_columns:
+                            self.stored_data[col] = self.stored_data[col].dt.strftime('%Y-%m-%d %H:%M:%S')
+
+                        self.last_fetch_time = datetime.now()
+
+                        # Convert to JSON
+                        json_data = self.stored_data.to_dict(orient='records')
+
+                        # Get daily and weekly stats
+                        daily_stats = self.get_daily_stats()
+                        weekly_stats = self.get_weekly_stats()
+
+                        return {
+                            "success": True,
+                            "data": json_data,
+                            "type": "full_refresh",
+                            "daily_stats": daily_stats,
+                            "weekly_stats": weekly_stats
+                        }
+
+                    except Exception as e:
+                        print(f"Error processing data: {str(e)}")
+                        import traceback
+                        traceback.print_exc()
+                        return {"error": f"Error processing data: {str(e)}"}
+                else:
+                    return {"error": f"Failed to get contracts. Status code: {response.status_code}"}
+
+            else:
+                # Get only new data since last fetch
+                print(f"Fetching incremental data since {self.last_fetch_time}...")
+                url = f"{self.base_url}/contracts"
+                params = {
+                    'start_date': self.last_fetch_time.strftime("%Y-%m-%d %H:%M:%S")
+                }
+                response = self.session.get(url, params=params, verify=False)
+
+                if response.status_code == 200:
+                    try:
+                        # Parse new data
+                        new_data = pd.DataFrame(response.json())
+
+                        if not new_data.empty:
+                            # Append new data to stored data
+                            self.stored_data = pd.concat([self.stored_data, new_data], ignore_index=True)
+                            # Remove duplicates if any
+                            self.stored_data = self.stored_data.drop_duplicates(subset=['id'], keep='last')
+
+                        self.last_fetch_time = datetime.now()
+
+                        # Convert to JSON
+                        json_data = json.loads(self.stored_data.to_json(orient='records', date_format='iso'))
+
+                        # Get daily and weekly stats
+                        daily_stats = self.get_daily_stats()
+                        weekly_stats = self.get_weekly_stats()
+
+                        return {
+                            "success": True,
+                            "data": json_data,
+                            "type": "incremental",
+                            "new_records": len(new_data) if not new_data.empty else 0,
+                            "daily_stats": daily_stats,
+                            "weekly_stats": weekly_stats
+                        }
+                    except Exception as e:
+                        print(f"Error processing incremental data: {e}")
+                        # If there's an error with incremental update, fall back to full refresh
+                        return self.get_contracts_as_json(force_full_refresh=True)
+                else:
+                    return {"error": f"Failed to get incremental data. Status code: {response.status_code}"}
+
+        except Exception as e:
+            print(f"Error getting contracts: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return {"error": f"Error getting contracts: {str(e)}"}
+
+    def get_daily_stats(self):
+        """Get daily stats of the sales"""
+        try:
+            if self.stored_data.empty:
+                return {"error": "No data available to calculate daily stats."}
+
+            df = self.stored_data.copy()
+
+            # Ensure 'Créer le' is in datetime format
+            df["Créer le"] = pd.to_datetime(df["Créer le"], errors='coerce')
+
+            # Group by commercial and day, then count sales
+            daily_stats = df.groupby([df['Commercial'], df['Créer le'].dt.date]).size().reset_index(name='Daily Sales')
+
+            # Convert 'Daily Sales' to int to ensure no floats
+            daily_stats['Daily Sales'] = daily_stats['Daily Sales'].astype(int)
+
+            # Convert the dataframe to a list of dictionaries (JSON serializable format)
+            daily_stats = daily_stats.to_dict(orient='records')
+
+            return daily_stats
+
+        except Exception as e:
+            return {"error": f"Error getting daily stats: {str(e)}"}
+
+    def get_weekly_stats(self):
+        """Get weekly stats of the sales"""
+        try:
+            if self.stored_data.empty:
+                return {"error": "No data available to calculate weekly stats."}
+
+            df = self.stored_data.copy()
+
+            # Ensure 'Créer le' is in datetime format
+            df["Créer le"] = pd.to_datetime(df["Créer le"], errors='coerce')
+
+            # Extract month and week number for each sale relative to the month
+            df['Month'] = df['Créer le'].dt.to_period('M')  # Extracts month in YYYY-MM format
+            df['Day of Month'] = df['Créer le'].dt.day
+            df['Relative Week Number'] = ((df['Day of Month'] - 1) // 7) + 1
+
+            # Group by commercial, month, and relative week number
+            weekly_stats = df.groupby([df['Commercial'], df['Month'], df['Relative Week Number']]).size().reset_index(name='Weekly Sales')
+
+            # Convert 'Weekly Sales' to int to ensure no floats
+            weekly_stats['Weekly Sales'] = weekly_stats['Weekly Sales'].astype(int)
+
+            # Convert the dataframe to a list of dictionaries (JSON serializable format)
+            weekly_stats = weekly_stats.to_dict(orient='records')
+
+            return weekly_stats
+
+        except Exception as e:
+            return {"error": f"Error getting weekly stats: {str(e)}"}
+
+
+        
+    def close(self):
+        """Close the client's session"""
+        try:
+            if self.session:
+                self.session.close()
+                self.session = None
+        except Exception as e:
+            print(f"Error closing session: {str(e)}")
+
+class JobsClient(BaseProxyClient):
+    def __init__(self):
+        super().__init__()
+        self.base_url = "https://www.moncallcenter.ma"
+        self.mcdesk_url = "https://mcdesk.moncallcenter.ma"
+        self.mcdesk_client = McProxyClient()  # Use proxy-enabled client for mcdesk
+        self.last_request_time = 0
+        self.min_request_interval = 1  
+        self.log_file: str = 'downloaded_cvs.txt'
+        self.cvs_folder: str = 'cvs'
+        
+        # Add default timeouts
+        self.timeout = (10, 30)  # (connect timeout, read timeout)
+        
+        # Set up default headers
+        default_headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7'
+        }
+        
+        self.session.headers.update(default_headers)
+
+        # Create the cvs directory if it doesn't exist
+        if not os.path.exists(self.cvs_folder):
+            os.makedirs(self.cvs_folder)
+
+    def login(self, username: str, password: str, timeout=None) -> bool:
+        """Login to moncallcenter.ma and mcdesk subdomain"""
+        try:
+            # Set timeout from parameter or use default
+            request_timeout = timeout or self.timeout
             
+            # Login to main site using proxy-enabled request method
+            login_url = f"{self.base_url}/components/centre/loger_centre.php"
+            login_data = {
+                "LOGIN_C": username,
+                "PASSWORD_C": password
+            }
+            
+            try:
+                # Login to main site using proxy-enabled request method
+                response = self.make_request(
+                    'POST',
+                    login_url, 
+                    data=login_data, 
+                    timeout=request_timeout
+                )
+            except requests.exceptions.RequestException as e:
+                print(f"Login failed after retries: {str(e)}")
+                raise
+            
+            # Login to mcdesk using proxy-enabled client
+            mcdesk_success = self.mcdesk_client.login(username, password)
+            
+            # Verify main site login with proxy support
+            try:
+                check_response = self.make_request(
+                    'GET',
+                    f"{self.base_url}/recruteurs/",
+                    timeout=request_timeout
+                )
+                main_success = check_response.status_code == 200 and 'login' not in check_response.url
+                if main_success:
+                    print(f"Successfully logged into moncallcenter.ma as {username}")
+            except requests.exceptions.RequestException as e:
+                print(f"Login verification failed: {str(e)}")
+                main_success = False
+            
+            # Return true only if both logins succeeded
+            return main_success and mcdesk_success
+
         except Exception as e:
             print(f"Error during login: {str(e)}")
             import traceback
             traceback.print_exc()
             return False
 
-    def get_contracts_as_json(self, force_full_refresh=False):
-        """Get ERP contracts data from Excel export"""
+    def _wait_for_rate_limit(self):
+        """Ensure minimum time between requests"""
+        now = time.time()
+        time_since_last = now - self.last_request_time
+        if time_since_last < self.min_request_interval:
+            time.sleep(self.min_request_interval - time_since_last)
+        self.last_request_time = time.time()
+
+    def login_mcdesk(self, username: str, password: str) -> bool:
+        """Login to mcdesk.moncallcenter.ma"""
         try:
-            print("\n=== Getting Contracts Data ===")
-            
-            # Check if we need to re-authenticate
-            print("Checking dashboard access...")
-            dashboard_response = self.make_request(
-                'GET', 
-                f"{self.base_url}/dashboard",
-                verify=False
-            )
-            print(f"Dashboard response status: {dashboard_response.status_code}")
-            print(f"Dashboard URL: {dashboard_response.url}")
-            
-            if dashboard_response.status_code != 200 or 'login' in dashboard_response.url:
-                print("Session expired, re-authenticating...")
-                if not self.login(os.getenv("ERP_EMAIL"), os.getenv("ERP_PASSWORD")):
-                    return {"error": "Failed to re-authenticate with ERP"}
+            login_url = f"{self.mcdesk_url}/components/session/loger.php"
+            login_data = {
+                "LOGIN_APP": username,
+                "PASSWORD_APP": password
+            }
 
-            # Get the contracts export
-            print("\nFetching contracts export...")
-            response = self.make_request(
-                'GET',
-                f"{self.base_url}/contracts/export",
-                verify=False,
-                headers={
-                    'Accept': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-                }
-            )
-            
-            print(f"Export response status: {response.status_code}")
-            print(f"Content-Type: {response.headers.get('content-type', 'Not specified')}")
-            
-            if response.status_code != 200:
-                return {"error": f"Failed to get contracts export. Status code: {response.status_code}"}
+            response = self.mcdesk_client.session.post(login_url, data=login_data)
+            if response.status_code == 200:
+                print(f"Successfully logged into mcdesk as {username}")
+                return True
 
-            # Read Excel data
-            print("\nReading Excel data...")
-            try:
-                excel_data = pd.read_excel(BytesIO(response.content))
-                print(f"Found {len(excel_data)} contracts")
-                
-                # Clean up the data
-                excel_data = excel_data.replace({pd.NA: None})
-                excel_data = excel_data.fillna('')
-                
-                # Convert to dict format
-                contracts = excel_data.to_dict('records')
-                
-                # Store the data
-                self.stored_data = excel_data
-                self.last_fetch_time = datetime.now()
-                
-                return {
-                    "success": True,
-                    "data": contracts,
-                    "type": "full" if force_full_refresh else "incremental",
-                    "timestamp": self.last_fetch_time.isoformat()
-                }
-                
-            except Exception as e:
-                print(f"Error reading Excel data: {str(e)}")
-                return {"error": f"Failed to read Excel data: {str(e)}"}
+            print(f"Failed to login to mcdesk. Status: {response.status_code}")
+            return False
 
         except Exception as e:
-            print(f"\nError getting contracts: {str(e)}")
+            print(f"Error during mcdesk login: {str(e)}")
+            return False
+
+    def check_mcdesk_session(self) -> bool:
+        """Check if mcdesk session is active"""
+        try:
+            response = self.mcdesk_client.session.get(self.mcdesk_url)
+            return response.status_code == 200 and "login" not in response.url
+        except Exception as e:
+            print(f"Error checking mcdesk session: {str(e)}")
+            return False
+
+    def get_mcdesk_data(self, endpoint: str, params: dict = None) -> dict:
+        """Fetch data from mcdesk.moncallcenter.ma"""
+        try:
+            url = f"{self.mcdesk_url}/{endpoint}"
+            response = self.mcdesk_client.session.get(url, params=params)
+
+            if response.status_code == 200:
+                print(f"Data fetched successfully from {url}")
+                return response.json()
+
+            print(f"Failed to fetch data from mcdesk. Status: {response.status_code}")
+            return {}
+
+        except Exception as e:
+            print(f"Error fetching data from mcdesk: {str(e)}")
+            return {}
+
+    def close(self):
+        """Close all sessions"""
+        try:
+            if self.session:
+                self.session.close()
+                self.session = None
+            if self.mcdesk_client.session:
+                self.mcdesk_client.session.close()
+                self.mcdesk_client.session = None
+        except Exception as e:
+            print(f"Error closing sessions: {str(e)}")
+            
+    def get_job_details(self, job_url: str):
+        """Get detailed information about a specific job"""
+        try:
+            print(f"\nFetching details for job: {job_url}")
+            response = self.make_request('GET', job_url)
+            if response.status_code != 200:
+                print(f"Failed to fetch job details. Status: {response.status_code}")
+                raise Exception("Failed to fetch job details")
+
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # Find duplicate button with exact classes and attributes
+            duplicate_button = soup.find("a", {"class": "duplioffre", "href": "javascript:void(0)"})
+            
+            if duplicate_button:
+                print(f"Found duplicate button with data-id: {duplicate_button.get('data-id')}")
+                print(f"Button HTML: {duplicate_button}")
+                
+            can_duplicate = bool(duplicate_button)
+            print(f"Can duplicate: {can_duplicate}")
+
+            # Get main job info
+            title = soup.find("h1").text.strip()
+            company = soup.find("h2").find("a").text.strip()
+            metadata = soup.find("span", text=re.compile(r"\d{2}-\d{2}-\d{4}")).text.strip()
+            date_str = re.search(r"(\d{2}-\d{2}-\d{4})", metadata).group(1)
+            date = datetime.strptime(date_str, "%d-%m-%Y").strftime("%Y-%m-%d")
+            location = metadata.split(" - ")[-1]
+            
+            # Get stats
+            stats_badge = soup.find("i", class_="badge")
+            applications = re.search(r"Nbr candidatures :\s*(\d+)", stats_badge.text).group(1) if stats_badge else "0"
+            
+            # Get job sections
+            sections = {}
+            for section in soup.find_all("h3"):
+                section_title = section.text.strip()
+                section_content = section.find_next("p").text.strip()
+                sections[section_title] = section_content
+
+            # Get languages
+            languages = []
+            lang_span = soup.find("span", text=re.compile("Langue\(s\)"))
+            if lang_span:
+                languages = [a.text.strip("# ") for a in lang_span.find_all("a")]
+
+            result = {
+                "title": title,
+                "company": company,
+                "url": job_url,
+                "date": date,
+                "location": location,
+                "languages": languages,
+                "stats": {
+                    "applications": int(applications)
+                },
+                "sections": sections,
+                "can_duplicate": can_duplicate
+            }
+            print(f"Job details parsed successfully: {result}")
+            return result
+
+        except Exception as e:
+            print(f"Error getting job details: {str(e)}")
             import traceback
             traceback.print_exc()
-            return {"error": f"Error getting contracts: {str(e)}"}
-
-class JobsClient(BaseProxyClient):
-    def __init__(self):
-        super().__init__()
-        self.base_url = "https://www.moncallcenter.ma"
-        self.login_url = f"{self.base_url}/components/centre/loger_centre.php"
+            raise
+    
+    
+    def parse_pagination(self, html_content: str) -> dict:
+        """
+        Parse pagination information from mcdesk.moncallcenter.ma HTML content.
         
-        self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        })
+        Args:
+            html_content (str): Raw HTML content from the page
+            
+        Returns:
+            dict: Dictionary containing pagination information including:
+                - current_page: Current page number
+                - last_page: Last page number
+                - total_entries: Total number of entries if available
+        """
+        try:
+            print("Starting pagination parsing...")
+            
+            # Parse HTML content
+            soup = BeautifulSoup(html_content, 'html.parser')
+            print("HTML content parsed successfully.")
+            
+            # Find all pagination links
+            pagination_links = soup.find_all('a', href=True)
+            print(f"Found {len(pagination_links)} links on the page.")
+            
+            # Extract page numbers
+            page_numbers = []
+            for link in pagination_links:
+                href = link.get('href')
+                if href and 'page=' in href:
+                    try:
+                        page_num = int(re.search(r'page=(\d+)', href).group(1))
+                        page_numbers.append(page_num)
+                    except (ValueError, AttributeError):
+                        continue
 
-    def login(self, username, password, timeout=60):
-        """Login with proxy support"""
-        max_retries = 5
-        retry_delay = 10
-        
-        for attempt in range(max_retries):
-            try:
-                response = self.make_request(
-                    'POST',
-                    self.login_url,
-                    data={
-                        'username': username,
-                        'password': password
-                    },
-                    timeout=timeout,
-                    verify=False
-                )
-                
-                if response.status_code == 200:
-                    return True
-                    
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    print(f"Login attempt {attempt + 1} failed: {str(e)}")
-                    time.sleep(retry_delay)
-                    continue
+            # Determine last page number
+            if page_numbers:
+                last_page = max(page_numbers)
+                print(f"Last page number determined: {last_page}")
+            else:
+                # If no pagination is found, assume we're on the only page
+                last_page = 1
+                print("No pagination found - assuming single page (last_page=1).")
+            
+            # Get total entries if available
+            total_entries = None
+            entries_text = soup.find('h3')
+            if entries_text:
+                print(f"Found entries text: {entries_text.text}")
+                match = re.search(r'(\d+)\s+candidatures', entries_text.text)
+                if match:
+                    total_entries = int(match.group(1))
+                    print(f"Total entries found: {total_entries}")
                 else:
-                    print(f"Error during login after {max_retries} attempts: {str(e)}")
-                    return False
+                    print("No total entries match found in text.")
+            else:
+                print("No entries text (h3) found.")
+            
+            print("Pagination parsing completed successfully.")
+            return {
+                "current_page": 1,  # Default to 1 since we're on the first page
+                "last_page": last_page,
+                "total_entries": total_entries
+            }
+        
+        except Exception as e:
+            print(f"Error parsing pagination: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            # Return default values instead of None to avoid errors
+            return {
+                "current_page": 1,
+                "last_page": 1,
+                "total_entries": None
+            }
+    
+    def download_cv(self, cv_url: str):
+        """Download the CV file and store it in the cvs folder with original filename."""
+        try:
+            response = self.mcdesk_client.make_request('GET', cv_url)
+            response.raise_for_status()
+            
+            # Get filename from Content-Disposition header, fallback to last URL segment
+            if 'Content-Disposition' in response.headers:
+                content_disposition = response.headers['Content-Disposition']
+                filename = re.findall("filename=(.+)", content_disposition)[0].strip('"')
+            else:
+                filename = cv_url.split('/')[-1]
                 
-        return False
+            file_path = os.path.join(self.cvs_folder, filename)
+            
+            with open(file_path, 'wb') as file:
+                file.write(response.content)
+            print(f"Downloaded: {cv_url} to {file_path}")
+            
+            with open(self.log_file, 'a') as log:
+                log.write(f"{cv_url}\n")
+                
+        except requests.exceptions.RequestException as e:
+            print(f"Error downloading {cv_url}: {e}")
+
+    def get_candidatures(self, company: Optional[str] = None) -> List[dict]:
+        """Get candidatures listings and details from mcdesk."""
+        try:
+            cands_url = f"{self.mcdesk_url}/candidatures/?"
+            print(f"Fetching candidatures from: {cands_url}")
+            cands_response = self.mcdesk_client.make_request('GET', cands_url)
+            
+            if cands_response.status_code != 200:
+                raise Exception(f"Failed to fetch candidatures: {cands_response.status_code}")
+            
+            # Save the HTML for debugging
+            with open('debug_candidates_page.html', 'w', encoding='utf-8') as f:
+                f.write(cands_response.text)
+            print("Saved candidates HTML to debug_candidates_page.html for inspection")
+            
+            # Parse the main page
+            soup = BeautifulSoup(cands_response.text, 'html.parser')
+            
+            # Find the candidature count (e.g., "1941 candidatures")
+            candidature_text = soup.find(text=re.compile(r'\d+\s+candidatures'))
+            total_candidatures = 0
+            if candidature_text:
+                match = re.search(r'(\d+)\s+candidatures', candidature_text)
+                if match:
+                    total_candidatures = int(match.group(1))
+                    print(f"Found {total_candidatures} total candidatures")
+            
+            # Get pagination information
+            pagination = soup.select('ul.pagination li a')
+            page_numbers = []
+            for link in pagination:
+                if link.text.isdigit():
+                    page_numbers.append(int(link.text))
+            
+            if page_numbers:
+                last_page = max(page_numbers)
+                print(f"Found pagination with {last_page} pages")
+            else:
+                # Look for the last page indicator
+                last_page_elem = soup.select_one('a[href*="page"][href$="-86"]')
+                if last_page_elem:
+                    try:
+                        last_page_text = last_page_elem.text.strip()
+                        if last_page_text.isdigit():
+                            last_page = int(last_page_text)
+                            print(f"Found last page through href: {last_page}")
+                        else:
+                            last_page = 1
+                    except:
+                        last_page = 1
+                else:
+                    last_page = 1
+                    print("No pagination found, assuming single page")
+            
+            # Initialize storage
+            candidates_details = []
+            
+            # Process each page
+            for page in range(1, last_page + 1):
+                page_url = f"{cands_url}page={page}"
+                print(f"\nProcessing page {page} of {last_page}...")
+                
+                if page > 1:  # We already have page 1 content
+                    page_response = self.mcdesk_client.make_request('GET', page_url)
+                    if page_response.status_code != 200:
+                        print(f"Failed to fetch page {page}. Skipping...")
+                        continue
+                    page_soup = BeautifulSoup(page_response.text, 'html.parser')
+                else:
+                    page_soup = soup  # Use the already parsed soup
+                
+                # Find the main candidates table - based on the screenshot it appears to be the only table
+                candidate_table = page_soup.find('table', class_='table-bordered')
+                if not candidate_table:
+                    # Try without the class if not found
+                    candidate_table = page_soup.find('table')
+                
+                if not candidate_table:
+                    print(f"No candidate table found on page {page}")
+                    continue
+                
+                # Get all rows from the table
+                rows = candidate_table.find_all('tr')
+                header_row = rows[0] if rows else None
+                
+                if not header_row:
+                    print("No header row found in the table")
+                    continue
+                
+                # Extract table headers to identify columns
+                headers = [th.text.strip() for th in header_row.find_all(['th', 'td'])]
+                print(f"Found table headers: {headers}")
+                
+                # Determine column indices
+                date_idx = next((i for i, h in enumerate(headers) if 'date' in h.lower()), 0)
+                name_idx = next((i for i, h in enumerate(headers) if 'nom' in h.lower() or 'name' in h.lower()), 1)
+                cv_idx = next((i for i, h in enumerate(headers) if 'cv' in h.lower()), 2)
+                offer_idx = next((i for i, h in enumerate(headers) if 'offre' in h.lower() or 'offer' in h.lower()), 3)
+                
+                # Process each row
+                for row in rows[1:]:  # Skip header
+                    try:
+                        # Extract cells
+                        cells = row.find_all(['td', 'th'])
+                        if len(cells) <= max(date_idx, name_idx, cv_idx, offer_idx):
+                            continue
+                        
+                        # Extract date and time
+                        date_cell = cells[date_idx]
+                        date_text = date_cell.text.strip()
+                        try:
+                            date_parts = date_text.split(' ')
+                            date = date_parts[0] if date_parts else "Unknown"
+                            time = date_parts[1] if len(date_parts) > 1 else "00:00"
+                        except:
+                            date = date_text
+                            time = "00:00"
+                        
+                        # Extract candidate name
+                        name_cell = cells[name_idx]
+                        name = name_cell.text.strip()
+                        
+                        # Look for candidate details link
+                        candidate_url = None
+                        candidate_id = None
+                        detail_link = name_cell.find('a')
+                        if detail_link and 'href' in detail_link.attrs:
+                            candidate_url = detail_link['href']
+                            id_match = re.search(r'id-(\d+)', candidate_url)
+                            candidate_id = id_match.group(1) if id_match else None
+                        
+                        # Extract CV link
+                        cv_cell = cells[cv_idx]
+                        cv_link = cv_cell.find('a')
+                        cv_url = cv_link['href'] if cv_link and 'href' in cv_link.attrs else None
+                        
+                        # Get offer details
+                        offer_cell = cells[offer_idx]
+                        offer = offer_cell.text.strip()
+                        
+                        # Create candidate record
+                        candidate = {
+                            'id': candidate_id or f"unknown-{len(candidates_details)}",
+                            'name': name,
+                            'date': date,
+                            'time': time,
+                            'offer': offer,
+                            'url': f"{self.mcdesk_url}{candidate_url}" if candidate_url else None,
+                            'cv_url': cv_url
+                        }
+                        
+                        print(f"Found candidate: {name} ({date})")
+                        candidates_details.append(candidate)
+                        
+                    except Exception as e:
+                        print(f"Error processing candidate row: {str(e)}")
+                        continue
+            
+            print(f"\nTotal candidates processed: {len(candidates_details)}")
+            return candidates_details
+        
+        except Exception as e:
+            print(f"Error getting candidatures: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return []
+
+    def get_jobs(self, company: Optional[str] = None):
+        """Get job listings from moncallcenter.ma"""
+        try:
+            # Get jobs page
+            jobs_url = f"{self.base_url}/{company.lower()}/jobsoffres-emploi" if company else f"{self.base_url}/offres-emploi/"
+            jobs_response = self.make_request('GET', jobs_url)
+            
+            print(
+                'url ', jobs_url
+            )
+            print(
+                'jobs_response' , jobs_response.status_code 
+            )
+            if jobs_response.status_code != 200:
+                raise Exception("Failed to fetch jobs page")
+
+            # Parse HTML
+            soup = BeautifulSoup(jobs_response.text, 'html.parser')
+            jobs_divs = soup.find_all("div", class_="offres")
+
+            jobs = []
+            for job_div in jobs_divs:
+                try:
+                    # Extract job details
+                    title_elem = job_div.find("h2").find("a")
+                    title = title_elem.text.strip()
+                    url = f"{self.base_url}{title_elem['href']}"
+                    
+                    # Get full job details
+                    job_details = self.get_job_details(url)
+                    jobs.append(job_details)
+
+                except Exception as e:
+                    print(f"Error parsing job: {str(e)}")
+                    continue
+
+            return {
+                "total": len(jobs),
+                "jobs": jobs
+            }
+
+        except Exception as e:
+            print(f"Error getting jobs: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            raise
+
+    def duplicate_job(self, job_id: str) -> bool:
+        """Duplicate a specific job offer"""
+        try:
+            # The duplication endpoint
+            url = f"{self.base_url}/components/offre/duplioffre.php"
+            
+            # Make the duplication request with the data-id
+            payload = {"id": job_id}
+            headers = {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'X-Requested-With': 'XMLHttpRequest',
+                'Referer': f"{self.base_url}/offre-emploi/-{job_id}"
+            }
+            
+            print(f"Making duplicate request to {url}")
+            print(f"With payload: {payload}")
+            print(f"With headers: {headers}")
+            
+            response = self.make_request('POST', url, data=payload, headers=headers)
+            print(f"Duplicate response status: {response.status_code}")
+            print(f"Duplicate response content: {response.text[:1000]}")
+            
+            return response.status_code == 200
+            
+        except Exception as e:
+            print(f"Error duplicating job {job_id}: {str(e)}")
+            return False
+
+    def check_login(self) -> bool:
+        """Check if we're currently logged in"""
+        try:
+            response = self.make_request('GET', f"{self.base_url}/recruteurs/")
+            return response.status_code == 200 and 'login' not in response.url
+        except Exception as e:
+            print(f"Error checking login status: {e}")
+            return False
+
+    def _wait_for_rate_limit(self):
+        """Ensure minimum time between requests"""
+        now = time.time()
+        time_since_last = now - self.last_request_time
+        if time_since_last < self.min_request_interval:
+            time.sleep(self.min_request_interval - time_since_last)
+        self.last_request_time = time.time()
+        
+    def get_duplicatable_jobs(self, company: str) -> list:
+        """Get all jobs and filter those that can be duplicated"""
+        try:
+            self._wait_for_rate_limit()  # Add rate limiting
+            print(f"\nFetching duplicatable jobs for {company}...")
+            jobs_url = f"{self.base_url}/{company}/offres-emploi"
+            response = self.make_request('GET', jobs_url)
+            
+            if response.status_code != 200:
+                print(f"Failed to fetch jobs page. Status: {response.status_code}")
+                return []
+
+            soup = BeautifulSoup(response.text, 'html.parser')
+            job_divs = soup.find_all("div", class_="offres")
+            print(f"Found {len(job_divs)} total job listings")
+
+            duplicatable_jobs = []
+            for job_div in job_divs:
+                try:
+                    # Extract basic job info
+                    title_elem = job_div.find("h2")
+                    if not title_elem:
+                        continue
+                        
+                    link_elem = title_elem.find("a")
+                    if not link_elem:
+                        continue
+                        
+                    title = link_elem.text.strip()
+                    relative_url = link_elem.get('href')
+                    if not relative_url:
+                        continue
+                        
+                    full_url = f"{self.base_url}{relative_url}"
+                    job_id = relative_url.split("-")[-1]
+
+                    # Check if job can be duplicated
+                    job_response = self.make_request('GET', full_url)
+                    if job_response.status_code != 200:
+                        print(f"Failed to fetch job details for {job_id}")
+                        continue
+
+                    job_soup = BeautifulSoup(job_response.text, 'html.parser')
+                    duplicate_button = job_soup.find("a", {
+                        "class": "duplioffre", 
+                        "href": "javascript:void(0)"
+                    })
+
+                    if duplicate_button:
+                        print(f"Found duplicatable job: {title} (ID: {job_id})")
+                        duplicatable_jobs.append({
+                            "id": job_id,
+                            "title": title,
+                            "url": full_url
+                        })
+
+                except Exception as e:
+                    print(f"Error processing job div: {str(e)}")
+                    continue
+
+            print(f"Found {len(duplicatable_jobs)} duplicatable jobs")
+            return duplicatable_jobs
+
+        except Exception as e:
+            print(f"Error in get_duplicatable_jobs: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return []
+
+    def duplicate_random_job(self, company: str) -> dict:
+        """Get duplicatable jobs and duplicate a random one for specific company"""
+        try:
+            print(f"\nStarting duplicate_random_job for {company}...")
+            
+            # Verify login status
+            if not self.check_login():
+                return {
+                    "success": False,
+                    "error": "Not logged in"
+                }
+
+            # Get duplicatable jobs for this company
+            duplicatable_jobs = self.get_duplicatable_jobs(company)
+            
+            if not duplicatable_jobs:
+                return {
+                    "success": False,
+                    "error": f"No duplicatable jobs found for {company}"
+                }
+
+            # Select random job
+            selected_job = random.choice(duplicatable_jobs)
+            print(f"\nSelected job for duplication:")
+            print(f"Title: {selected_job['title']}")
+            print(f"ID: {selected_job['id']}")
+
+            # Attempt duplication
+            duplicate_url = f"{self.base_url}/components/offre/duplioffre.php"
+            payload = {"id": selected_job['id']}
+            headers = {
+                "Content-Type": "application/x-www-form-urlencoded",
+                "X-Requested-With": "XMLHttpRequest",
+                "Referer": selected_job['url']
+            }
+
+            print(f"Sending duplication request...")
+            response = self.session.post(duplicate_url, data=payload, headers=headers)
+            
+            if response.status_code == 200:
+                return {
+                    "success": True,
+                    "message": "Job duplicated successfully",
+                    "job": selected_job
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": f"Duplication failed with status {response.status_code}",
+                    "job": selected_job
+                }
+
+        except Exception as e:
+            print(f"Error in duplicate_random_job: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return {
+                "success": False,
+                "error": str(e)
+            }
+
+    def export_candidatures_to_csv(self, company: Optional[str] = None, output_file: str = 'candidatures.csv') -> str:
+        """
+        Export candidatures to a CSV file without downloading CV files
+        
+        Args:
+            company: Optional company name to filter candidatures
+            output_file: Name of the output CSV file
+            
+        Returns:
+            Message with export result
+        """
+        try:
+            # Get candidatures data (without downloading CVs)
+            candidates = self.get_candidatures(company)
+            
+            if not candidates:
+                print("No candidatures found to export")
+                return f"No candidatures found to export"
+            
+            # Create CSV file
+            import csv
+            
+            # Ensure the directory exists
+            output_dir = os.path.dirname(output_file)
+            if output_dir and not os.path.exists(output_dir):
+                os.makedirs(output_dir)
+            
+            with open(output_file, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                # Write header
+                writer.writerow(['ID', 'Name', 'Date', 'Time', 'Offer', 'CV URL'])
+                
+                # Write data
+                for candidate in candidates:
+                    writer.writerow([
+                        candidate.get('id', 'N/A'),
+                        candidate.get('name', 'N/A'),
+                        candidate.get('date', 'N/A'),
+                        candidate.get('time', 'N/A'),
+                        candidate.get('offer', 'N/A'),
+                        candidate.get('cv_url', 'N/A')
+                    ])
+            
+            print(f"Successfully exported {len(candidates)} candidatures to {output_file}")
+            return f"Successfully exported {len(candidates)} candidatures to {output_file}"
+            
+        except Exception as e:
+            error_msg = f"Error exporting candidatures to CSV: {str(e)}"
+            print(error_msg)
+            import traceback
+            traceback.print_exc()
+            return error_msg
+
+    def export_candidatures_to_google_sheet(self, sheet_id: str, company: Optional[str] = None, sheet_name: Optional[str] = None) -> str:
+        """
+        Export candidatures to a Google Sheet and only add new candidates.
+        Stops processing when it encounters an ID that already exists in the sheet.
+        
+        Args:
+            sheet_id: The ID of the Google Sheet to update
+            company: Optional company name to filter candidatures
+            sheet_name: Optional name of the specific sheet/tab to update (e.g., "Xpercia" or "Perextel")
+            
+        Returns:
+            Message with export result
+        """
+        try:
+            # Load Google credentials from service account file
+            # This assumes you have a credentials file named "google_credentials.json" in the project directory
+            creds_file = "google_credentials.json"
+            if not os.path.exists(creds_file):
+                return f"Error: Google credentials file '{creds_file}' not found"
+            
+            # Authenticate with Google Sheets API
+            try:
+                credentials = Credentials.from_service_account_file(
+                    creds_file,
+                    scopes=['https://www.googleapis.com/auth/spreadsheets']
+                )
+                sheets_service = build('sheets', 'v4', credentials=credentials)
+                print("Successfully authenticated with Google Sheets API")
+            except Exception as e:
+                error_msg = f"Error authenticating with Google Sheets API: {str(e)}"
+                print(error_msg)
+                return error_msg
+            
+            # Get candidatures data (without downloading CVs)
+            candidates = self.get_candidatures(company)
+            
+            if not candidates:
+                print("No candidatures found to export")
+                return "No candidatures found to export"
+            
+            # Prepare sheet range with sheet name if provided
+            sheet_range_prefix = f"'{sheet_name}'!" if sheet_name else ""
+            
+            # Read existing data from the sheet to get IDs
+            try:
+                result = sheets_service.spreadsheets().values().get(
+                    spreadsheetId=sheet_id,
+                    range=f"{sheet_range_prefix}A2:A"  # Assuming ID is in column A, starting from row 2 (after header)
+                ).execute()
+                
+                existing_ids = []
+                if 'values' in result:
+                    existing_ids = [row[0] for row in result.get('values', []) if row]
+                
+                print(f"Found {len(existing_ids)} existing candidates in the sheet")
+            except Exception as e:
+                error_msg = f"Error reading existing data from Google Sheet: {str(e)}"
+                print(error_msg)
+                return error_msg
+            
+            # Filter candidates to only include new ones
+            new_candidates = []
+            for candidate in candidates:
+                candidate_id = candidate.get('id', 'N/A')
+                
+                # If we encounter an existing ID, stop the extraction process
+                if candidate_id in existing_ids:
+                    print(f"Found existing candidate ID: {candidate_id}. Stopping extraction.")
+                    break
+                
+                new_candidates.append([
+                    candidate.get('id', 'N/A'),
+                    candidate.get('name', 'N/A'),
+                    candidate.get('date', 'N/A'),
+                    candidate.get('time', 'N/A'),
+                    candidate.get('offer', 'N/A'),
+                    candidate.get('cv_url', 'N/A')
+                ])
+            
+            if not new_candidates:
+                print("No new candidates to add")
+                return "No new candidates found to add to the sheet"
+            
+            # Check if the sheet has headers already
+            result = sheets_service.spreadsheets().values().get(
+                spreadsheetId=sheet_id,
+                range=f"{sheet_range_prefix}A1:F1"  # Check the header row
+            ).execute()
+            
+            header_exists = 'values' in result and len(result.get('values', [])) > 0
+            
+            # If no header exists, add it
+            if not header_exists:
+                header = [['ID', 'Name', 'Date', 'Time', 'Offer', 'CV URL']]
+                sheets_service.spreadsheets().values().update(
+                    spreadsheetId=sheet_id,
+                    range=f"{sheet_range_prefix}A1:F1",
+                    valueInputOption='RAW',
+                    body={'values': header}
+                ).execute()
+                print("Added header row to sheet")
+            
+            # Append new candidates to the sheet
+            append_range = f"{sheet_range_prefix}A2" if not existing_ids else f"{sheet_range_prefix}A{len(existing_ids) + 2}"
+            sheets_service.spreadsheets().values().append(
+                spreadsheetId=sheet_id,
+                range=append_range,
+                valueInputOption='RAW',
+                insertDataOption='INSERT_ROWS',
+                body={'values': new_candidates}
+            ).execute()
+            
+            sheet_info = f" (in '{sheet_name}' tab)" if sheet_name else ""
+            print(f"Successfully added {len(new_candidates)} new candidates to the Google Sheet{sheet_info}")
+            return f"Successfully added {len(new_candidates)} new candidates to the Google Sheet{sheet_info}"
+            
+        except Exception as e:
+            error_msg = f"Error exporting candidatures to Google Sheet: {str(e)}"
+            print(error_msg)
+            import traceback
+            traceback.print_exc()
+            return error_msg
 
 class NeoClient:
     def __init__(self):
@@ -1566,7 +2574,7 @@ class NeoClient:
                 if not mfa_success:
                     print("MFA verification failed")
                     return False
-                
+
             # Verify login success by checking dashboard access
             dashboard_response = self.session.get(
                 f"{self.base_url}/dashboard",
@@ -1969,3 +2977,92 @@ class NeoClient:
                 "total": contracts_count,
                 "total_pages": 1
             }
+
+    def close(self):
+        """Close the client's sessions"""
+        try:
+            # Close the main session through parent class
+            super().close()
+            
+            # Close the mcdesk session separately
+            if self.mcdesk_client.session:
+                self.mcdesk_client.session.close()
+                self.mcdesk_client.session = None
+                
+            print("All sessions closed successfully")
+        except Exception as e:
+            print(f"Error closing sessions: {str(e)}")
+
+class McProxyClient(BaseProxyClient):
+    """Client specifically for mcdesk.moncallcenter.ma with proxy support"""
+    def __init__(self):
+        super().__init__()
+        self.base_url = "https://mcdesk.moncallcenter.ma"
+        self.timeout = (10, 30)  # (connect timeout, read timeout)
+        
+        # Set up default headers
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7'
+        })
+
+    def login(self, username: str, password: str, timeout=None) -> bool:
+        """Login to mcdesk.moncallcenter.ma with proxy support"""
+        try:
+            # Use provided timeout or default
+            request_timeout = timeout or self.timeout
+            
+            login_url = f"{self.base_url}/components/session/loger.php"
+            login_data = {
+                "LOGIN_APP": username,
+                "PASSWORD_APP": password
+            }
+            
+            # Login using proxy-enabled request method
+            response = self.make_request(
+                'POST',
+                login_url, 
+                data=login_data, 
+                timeout=request_timeout
+            )
+            
+            # Verify login success
+            check_response = self.make_request(
+                'GET',
+                f"{self.base_url}/candidatures/?",
+                timeout=request_timeout
+            )
+            
+            success = check_response.status_code == 200 and 'login' not in check_response.url
+            if success:
+                print(f"Successfully logged into mcdesk.moncallcenter.ma as {username}")
+            else:
+                print(f"Failed to log into mcdesk.moncallcenter.ma")
+                
+            return success
+            
+        except Exception as e:
+            print(f"Error logging into mcdesk: {str(e)}")
+            return False
+
+# ============================================================================
+# PROXY IMPLEMENTATION SUMMARY
+# ============================================================================
+# 
+# Current Implementation:
+# - BaseProxyClient provides a proxy management base class with proxy rotation
+# - ERPClient inherits from BaseProxyClient and uses proxy functionality
+# - JobsClient now inherits from BaseProxyClient for main site requests
+# - McProxyClient added for mcdesk site with proxy functionality
+# 
+# Remaining Work:
+# - Some methods in JobsClient still need to be updated to use proxy functionality:
+#   - login_mcdesk
+#   - check_mcdesk_session
+#   - get_mcdesk_data
+#   - Any other methods using mcdesk_client.session directly
+# 
+# - Consider implementing a full proxy management system for both domains
+#   to reduce the risk of IP bans and improve reliability
+# ============================================================================
